@@ -7,10 +7,6 @@
 
 Persistent memory for Claude Code. 26 cognitive subsystems, 18 MCP tools, runs locally on SQLite.
 
-<!-- Add a demo GIF here before launch:
-![Zikkaron Demo](assets/demo.gif)
--->
-
 ## The Problem
 
 Every time you start a new Claude Code session, it forgets everything. Architecture decisions, debugging history, project conventions, file patterns you explained three times already — all gone. You end up re-explaining your entire codebase from scratch.
