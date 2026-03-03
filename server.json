@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.amanhij/zikkaron",
+  "title": "Zikkaron",
+  "description": "Biologically-inspired persistent memory engine for Claude Code MCP agents",
+  "repository": {
+    "url": "https://github.com/amanhij/Zikkaron",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "zikkaron",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

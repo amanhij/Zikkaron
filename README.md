@@ -1,5 +1,7 @@
 # Zikkaron
 
+<!-- mcp-name: io.github.amanhij/zikkaron -->
+
 [![PyPI](https://img.shields.io/pypi/v/zikkaron)](https://pypi.org/project/zikkaron/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
 [![Tests](https://img.shields.io/badge/tests-891%20passed-brightgreen)](#testing)
