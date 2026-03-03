@@ -88,27 +88,45 @@ Zikkaron exposes 18 tools over MCP:
 | `assess_coverage` | Evaluate knowledge coverage for a topic with gap identification |
 | `detect_gaps` | Find knowledge gaps in a project: isolated entities, stale regions, missing connections |
 
-## Installation
+## Quick Start
 
 Requires Python 3.11+.
 
 ```bash
-git clone https://github.com/amanhij/Zikkaron.git
-cd Zikkaron
-pip install -r requirements.txt
+pip install zikkaron
 ```
 
-### Running the server
+Add one line to your Claude Code MCP configuration (`~/.claude/settings.json`):
+
+```json
+{
+  "mcpServers": {
+    "zikkaron": {
+      "command": "zikkaron"
+    }
+  }
+}
+```
+
+That's it. Claude Code will launch Zikkaron automatically via stdio transport. No manual server management.
+
+### From source
 
 ```bash
-python -m zikkaron
+git clone https://github.com/amanhij/Zikkaron.git
+cd Zikkaron
+pip install -e .
 ```
 
-Default port: `8742`. Override with `--port`. Database defaults to `~/.zikkaron/memory.db`, override with `--db-path`.
+### SSE transport (advanced)
 
-### Connecting to Claude Code
+For running as a persistent background server instead of stdio:
 
-Add to your Claude Code MCP configuration (`~/.claude/settings.json`):
+```bash
+zikkaron --transport sse
+```
+
+Then configure Claude Code to connect via URL:
 
 ```json
 {
@@ -120,6 +138,8 @@ Add to your Claude Code MCP configuration (`~/.claude/settings.json`):
   }
 }
 ```
+
+Default port: `8742`. Override with `--port`. Database defaults to `~/.zikkaron/memory.db`, override with `--db-path`.
 
 ## Configuration
 
