@@ -1,0 +1,10 @@
+fastapi>=0.104.0
+sse-starlette>=1.6.0
+uvicorn>=0.24.0
+mcp>=1.0.0
+sentence-transformers>=2.2.0
+watchdog>=3.0.0
+pydantic>=2.5.0
+numpy>=1.24.0
+sqlite-vec>=0.1.6
+networkx>=3.0
