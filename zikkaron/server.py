@@ -368,8 +368,9 @@ def remember(content: str, context: str, tags: list[str]) -> dict:
             logger.debug("HDC encoding failed for memory %s", memory_id)
 
     memory = storage.get_memory(memory_id)
-    # Strip binary embedding from response
+    # Strip binary fields from response (not JSON-serializable)
     memory.pop("embedding", None)
+    memory.pop("hdc_vector", None)
     memory["curation_action"] = curation_action
     if gate_result is not None:
         memory["surprisal"] = gate_result["surprisal"]
@@ -434,6 +435,7 @@ def recall(query: str, max_results: int = 5, min_heat: float = 0.1) -> list[dict
         merged = merged[:max_results]
         for m in merged:
             m.pop("embedding", None)
+            m.pop("hdc_vector", None)
 
     # Boost heat, update last_accessed, and record metamemory access
     now = storage._now_iso()
@@ -472,9 +474,10 @@ def recall(query: str, max_results: int = 5, min_heat: float = 0.1) -> list[dict
             except Exception:
                 logger.debug("Reconsolidation failed for memory %s", m.get("id"))
 
-    # Strip binary embeddings from response (in case any slipped through)
+    # Strip binary fields from response (not JSON-serializable)
     for m in merged:
         m.pop("embedding", None)
+        m.pop("hdc_vector", None)
 
     return merged
 
@@ -530,6 +533,7 @@ def get_project_context(directory: str) -> list[dict]:
     memories = storage.get_memories_for_directory(directory, min_heat=settings.HOT_THRESHOLD)
     for m in memories:
         m.pop("embedding", None)
+        m.pop("hdc_vector", None)
     return memories
 
 
@@ -763,6 +767,7 @@ def navigate_memory(query: str, top_k: int = 5) -> list[dict]:
         mem = storage.get_memory(mid)
         if mem:
             mem.pop("embedding", None)
+            mem.pop("hdc_vector", None)
             mem["sr_proximity"] = round(proximity, 4)
             output.append(mem)
 
@@ -819,6 +824,7 @@ def resource_hot() -> str:
     memories = storage.get_memories_by_heat(settings.HOT_THRESHOLD)
     for m in memories:
         m.pop("embedding", None)
+        m.pop("hdc_vector", None)
     return json.dumps(memories, default=str)
 
 
@@ -829,6 +835,7 @@ def resource_stale() -> str:
     memories = storage.get_stale_memories()
     for m in memories:
         m.pop("embedding", None)
+        m.pop("hdc_vector", None)
     return json.dumps(memories, default=str)
 
 
