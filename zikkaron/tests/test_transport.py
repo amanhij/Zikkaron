@@ -122,16 +122,16 @@ class TestTransportSelection:
         import inspect
         sig = inspect.signature(server.main)
         assert "transport" in sig.parameters
-        assert sig.parameters["transport"].default == "sse"
+        assert sig.parameters["transport"].default == "stdio"
 
     def test_cli_transport_flag_default(self):
-        """CLI defaults to sse transport."""
+        """CLI defaults to stdio transport."""
         result = subprocess.run(
             [sys.executable, "-m", "zikkaron", "--help"],
             capture_output=True, text=True,
         )
         assert "--transport" in result.stdout
-        assert "sse" in result.stdout
+        assert "stdio" in result.stdout
         assert "streamable-http" in result.stdout
 
     def test_cli_rejects_invalid_transport(self):
