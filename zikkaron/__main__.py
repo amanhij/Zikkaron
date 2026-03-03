@@ -5,7 +5,7 @@ import argparse
 from zikkaron import __version__
 from zikkaron.server import main
 
-VALID_TRANSPORTS = ("sse", "streamable-http")
+VALID_TRANSPORTS = ("stdio", "sse", "streamable-http")
 
 STARTUP_BANNER = f"""\
 === Zikkaron v{__version__} ===
@@ -43,9 +43,9 @@ def cli():
     parser.add_argument(
         "--transport",
         type=str,
-        default="sse",
+        default="stdio",
         choices=VALID_TRANSPORTS,
-        help="MCP transport protocol (default: sse)",
+        help="MCP transport protocol (default: stdio)",
     )
     parser.add_argument(
         "--quiet",
@@ -54,14 +54,15 @@ def cli():
     )
     args = parser.parse_args()
 
-    if not args.quiet:
-        print(STARTUP_BANNER)
-        print(f"Transport: {args.transport}")
+    if not args.quiet and args.transport != "stdio":
+        import sys as _sys
+        print(STARTUP_BANNER, file=_sys.stderr)
+        print(f"Transport: {args.transport}", file=_sys.stderr)
         if args.port:
-            print(f"Port: {args.port}")
+            print(f"Port: {args.port}", file=_sys.stderr)
         if args.db_path:
-            print(f"Database: {args.db_path}")
-        print()
+            print(f"Database: {args.db_path}", file=_sys.stderr)
+        print(file=_sys.stderr)
 
     main(port=args.port, db_path=args.db_path, transport=args.transport)
 

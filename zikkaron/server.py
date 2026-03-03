@@ -961,7 +961,7 @@ def _signal_handler(signum, frame):
 def main(
     port: int | None = None,
     db_path: str | None = None,
-    transport: str = "sse",
+    transport: str = "stdio",
 ):
     global _active_transport, _start_time
 
