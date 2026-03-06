@@ -197,25 +197,26 @@ def test_get_project_context_filters_by_directory():
     server.remember("project A memory", "/projects/a", ["a"])
     server.remember("project B memory", "/projects/b", ["b"])
 
-    results = server.get_project_context("/projects/a")
-    assert all(r["directory_context"] == "/projects/a" for r in results)
+    result = server.get_project_context("/projects/a")
+    assert "memories" in result
+    assert all(r["directory_context"] == "/projects/a" for r in result["memories"])
 
 
 def test_get_project_context_filters_by_heat():
     r = server.remember("cold memory", "/projects/c", ["test"])
     server._get_storage().update_memory_heat(r["id"], 0.1)
 
-    results = server.get_project_context("/projects/c")
-    assert len(results) == 0  # 0.1 < HOT_THRESHOLD (0.7)
+    result = server.get_project_context("/projects/c")
+    assert len(result["memories"]) == 0  # 0.1 < HOT_THRESHOLD (0.7)
 
 
 def test_get_project_context_returns_hot():
     server.remember("hot memory", "/projects/d", ["test"])  # heat=1.0
 
-    results = server.get_project_context("/projects/d")
-    assert len(results) == 1
-    assert results[0]["content"] == "hot memory"
-    assert "embedding" not in results[0]
+    result = server.get_project_context("/projects/d")
+    assert len(result["memories"]) == 1
+    assert result["memories"][0]["content"] == "hot memory"
+    assert "embedding" not in result["memories"][0]
 
 
 # ── consolidate_now ────────────────────────────────────────────────────
