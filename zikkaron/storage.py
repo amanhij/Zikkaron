@@ -334,6 +334,28 @@ class StorageEngine:
 
         c.commit()
 
+        # -- v4: Hippocampal Replay checkpoints --
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS checkpoints(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL DEFAULT 'default',
+                directory_context TEXT NOT NULL,
+                current_task TEXT DEFAULT '',
+                files_being_edited TEXT DEFAULT '[]',
+                key_decisions TEXT DEFAULT '[]',
+                open_questions TEXT DEFAULT '[]',
+                next_steps TEXT DEFAULT '[]',
+                active_errors TEXT DEFAULT '[]',
+                custom_context TEXT DEFAULT '',
+                epoch INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                is_active INTEGER DEFAULT 1
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_checkpoints_active ON checkpoints(is_active, created_at DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_checkpoints_epoch ON checkpoints(epoch)")
+        c.commit()
+
     # -- helpers --
 
     def _row_to_dict(self, row: sqlite3.Row | None) -> dict | None:
@@ -1287,6 +1309,58 @@ class StorageEngine:
                     self.insert_vector(memory_id, embedding)
                 except Exception:
                     pass
+
+    # -- Checkpoints (Hippocampal Replay) --
+
+    def insert_checkpoint(self, data: dict) -> int:
+        """Insert a new checkpoint, deactivating all previous ones."""
+        now = self._now_iso()
+        self._conn.execute("UPDATE checkpoints SET is_active = 0 WHERE is_active = 1")
+        cursor = self._conn.execute(
+            """INSERT INTO checkpoints
+               (session_id, directory_context, current_task, files_being_edited,
+                key_decisions, open_questions, next_steps, active_errors,
+                custom_context, epoch, created_at, is_active)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+            (
+                data.get("session_id", "default"),
+                data["directory_context"],
+                data.get("current_task", ""),
+                json.dumps(data.get("files_being_edited", [])),
+                json.dumps(data.get("key_decisions", [])),
+                json.dumps(data.get("open_questions", [])),
+                json.dumps(data.get("next_steps", [])),
+                json.dumps(data.get("active_errors", [])),
+                data.get("custom_context", ""),
+                data.get("epoch", 0),
+                now,
+            ),
+        )
+        self._conn.commit()
+        return cursor.lastrowid
+
+    def get_active_checkpoint(self) -> dict | None:
+        """Get the most recent active checkpoint."""
+        row = self._conn.execute(
+            "SELECT * FROM checkpoints WHERE is_active = 1 ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        for field in ("files_being_edited", "key_decisions", "open_questions", "next_steps", "active_errors"):
+            if isinstance(d.get(field), str):
+                d[field] = json.loads(d[field])
+        return d
+
+    def get_current_epoch(self) -> int:
+        """Get the current compaction epoch number."""
+        row = self._conn.execute("SELECT MAX(epoch) FROM checkpoints").fetchone()
+        return row[0] if row[0] is not None else 0
+
+    def increment_epoch(self) -> int:
+        """Increment and return the new epoch number."""
+        current = self.get_current_epoch()
+        return current + 1
 
     def close(self):
         self._conn.close()

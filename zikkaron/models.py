@@ -206,3 +206,22 @@ class CausalDAGEdge(BaseModel):
     confidence: float = 1.0
     discovered_at: datetime = Field(default_factory=datetime.utcnow)
     is_validated: bool = False
+
+
+# -- v4 models --
+
+
+class Checkpoint(BaseModel):
+    id: Optional[int] = None
+    session_id: str = "default"
+    directory_context: str
+    current_task: str = ""
+    files_being_edited: list[str] = Field(default_factory=list)
+    key_decisions: list[str] = Field(default_factory=list)
+    open_questions: list[str] = Field(default_factory=list)
+    next_steps: list[str] = Field(default_factory=list)
+    active_errors: list[str] = Field(default_factory=list)
+    custom_context: str = ""
+    epoch: int = 0  # compaction epoch counter
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    is_active: bool = True  # only latest checkpoint is active

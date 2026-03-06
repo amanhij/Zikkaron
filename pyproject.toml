@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zikkaron"
-version = "0.1.2"
+version = "0.2.0"
 description = "Biologically-inspired persistent memory engine for Claude Code"
 readme = "README.md"
 license = "MIT"
@@ -34,10 +34,10 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "fastapi>=0.104.0",
+    "fastapi>=0.109.1",
     "sse-starlette>=1.6.0",
     "uvicorn>=0.24.0",
-    "mcp>=1.0.0",
+    "mcp>=1.23.0",
     "sentence-transformers>=2.2.0",
     "watchdog>=3.0.0",
     "pydantic>=2.5.0",
