@@ -4,24 +4,24 @@
 
 [![PyPI](https://img.shields.io/pypi/v/zikkaron)](https://pypi.org/project/zikkaron/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-891%20passed-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-905%20passed-brightgreen)](#testing)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 
-Persistent memory for Claude Code. 26 cognitive subsystems, 18 MCP tools, runs locally on SQLite.
+*Zikkaron (זיכרון) is Hebrew for "memory."*
 
-## The Problem
+Your AI forgets you every time you close the tab. Every architecture decision you explained, every debugging rabbit hole you went down together, every "remember, we're using Postgres not SQLite" correction. Gone. You start the next session a stranger to your own tools.
 
-Every time you start a new Claude Code session, it forgets everything. Architecture decisions, debugging history, project conventions, file patterns you explained three times already — all gone. You end up re-explaining your entire codebase from scratch.
+Zikkaron is a persistent memory engine for Claude Code built on computational neuroscience. It remembers what you worked on, how you think, what you decided and why. Not as a dumb text dump that gets shoved into context, but as a living memory system that consolidates, forgets intelligently, and reconstructs the right context at the right time.
 
-Zikkaron fixes this. It gives Claude Code a persistent memory that survives across sessions, consolidates over time, and surfaces the right context when you need it.
+26 subsystems. 23 MCP tools. Runs entirely on your machine. One SQLite file.
 
-## Quick Start
+## Two minutes to never repeat yourself again
 
 ```bash
 pip install zikkaron
 ```
 
-Add to your Claude Code MCP config (`~/.claude/settings.json`):
+Add to your Claude Code config:
 
 ```json
 {
@@ -33,98 +33,115 @@ Add to your Claude Code MCP config (`~/.claude/settings.json`):
 }
 ```
 
-Done. Claude Code now has persistent memory.
-
-### Make Claude use it automatically
-
-Add this to your project's `CLAUDE.md`:
+Tell Claude how to use it. Drop this in your project's `CLAUDE.md`:
 
 ```markdown
-## Memory — Zikkaron
-- On every new session, call `recall` with the current project name to load prior context
-- Before starting any task, call `get_project_context` for the current working directory
-- After completing any significant task, call `remember` to store what was done, decisions made, and outcomes
+## Memory
+- On every new session, call `recall` with the current project name
+- Before starting any task, call `get_project_context` for the current directory
+- After completing significant work, call `remember` to store decisions and outcomes
 ```
 
-## What It Looks Like
+That's it. Claude remembers now.
 
-**Session 1** — You're debugging a tricky auth issue:
+## What this actually feels like
+
+**Monday.** You spend an hour debugging a nasty auth token race condition. Claude helps you trace it to a TTL mismatch between Redis and your JWT config. You fix it. Claude stores the memory.
+
+**Thursday.** A user reports intermittent logouts. You open Claude Code in the same project. Before you even describe the bug, Claude recalls the Redis TTL fix from Monday, checks if it's related, and asks whether the middleware you added is handling the edge case where Redis restarts mid-session.
+
+That's the difference. Not "here's your conversation history." Real recall. The kind where your tools understand the shape of what you've been building, not just the words you typed last time.
+
+## Hippocampal Replay: Context that survives compaction
+
+Here's a problem nobody talks about. Claude Code has a 200K token context window. During long sessions, when that window fills up, it *compacts*: summarizes older messages, strips tool outputs, paraphrases your instructions. Important nuance evaporates. Decisions you anchored early in the conversation dissolve into vague summaries.
+
+**Hippocampal Replay** fixes this. Named after the neuroscience phenomenon where your brain replays important experiences during sleep to consolidate them into long-term memory, it treats context compaction as the "sleep" and replays what matters when Claude "wakes up."
+
+**How it works:**
+
+Before compaction hits, a hook fires. Zikkaron drains your active context: what you were working on, which files were open, what decisions you'd made, what errors were unresolved. It stores all of this as a checkpoint.
+
+After compaction, a second hook fires. Zikkaron reconstructs your context intelligently. Not by dumping everything back in, but by assembling the right pieces: your latest checkpoint, any facts you'd anchored as critical, the hottest project memories, and predictions about what you'll need next based on your usage patterns.
+
+You can also be explicit about what matters:
+
 ```
-Tool: remember
-  content: "Auth tokens expire silently when Redis cache is cold-started.
-            Fix: added token refresh middleware in auth/middleware.py.
-            Root cause was TTL mismatch between Redis and JWT expiry."
-  context: "myapp backend debugging"
-  tags: ["auth", "redis", "debugging"]
+Tool: anchor
+  content: "We're using the event-sourcing pattern. All state changes go through the event bus."
+  reason: "Architecture constraint"
 ```
 
-**Session 2** — Days later, a related bug appears. Claude automatically recalls:
+Anchored memories get maximum protection. They always survive compaction, no matter what.
+
+**One-time setup per project:**
+
 ```
-Tool: recall
-  query: "authentication token issues"
-
-> Memory #42 (heat: 0.87): Auth tokens expire silently when Redis cache
-> is cold-started. Fix: added token refresh middleware in auth/middleware.py.
-> Root cause was TTL mismatch between Redis and JWT expiry.
+Tool: install_hooks
+  project_directory: "/path/to/your/project"
 ```
 
-No re-explaining. No digging through old conversations. It just remembers.
+After that, everything is automatic. You don't think about it. You don't call anything manually. The hooks fire, the context drains, the context restores. Your long sessions just... work.
 
-## How It Works
+## The science under the hood
 
-Zikkaron isn't a text file that gets loaded on startup. It's a memory engine built on computational neuroscience:
+Zikkaron doesn't store memories the way a database stores rows. It treats them more like a brain treats experiences.
 
-- **Predictive coding write gate** — Only stores what's actually new. Redundant information is filtered at ingest.
-- **Heat-based salience** — Frequently accessed memories stay hot. Unused ones decay naturally, like biological memory.
-- **Sleep consolidation** — Background process replays memories, discovers cross-project connections, and compresses old knowledge.
-- **Reconsolidation** — Memories update when retrieved in new contexts, staying accurate as your codebase evolves.
-- **Fractal hierarchy** — Memories cluster into summaries at multiple scales. Drill down from high-level architecture to specific implementation details.
-- **Knowledge graph** — Entities and relationships are extracted and linked. Personalized PageRank surfaces contextually relevant memories.
-- **Causal discovery** — Learns cause-effect relationships from your coding sessions using the PC algorithm.
-- **Successor representations** — Memories that co-occur in similar contexts cluster together, even when their content differs.
+**Memories have temperature.** Every memory starts hot. If you keep accessing it, it stays hot. If you don't, it cools. Below a threshold, it compresses: first to a gist, then to tags, then eventually it fades entirely. This isn't a bug. It's rate-distortion optimal forgetting, the same mathematical framework your brain uses to decide what's worth keeping. Important memories resist compression. Surprising ones get a heat boost. Boring, redundant ones quietly disappear.
 
-All data stays on your machine in a single SQLite database. No cloud, no API calls, no telemetry.
+**Storage has a gatekeeper.** Not everything deserves to be remembered. Zikkaron maintains a predictive model of what it already knows, and only stores information that violates its expectations. Tell it the same thing twice and the write gate blocks the second attempt. This is predictive coding: the same mechanism your neocortex uses to filter sensory input. Only prediction errors get through.
 
-## MCP Tools
+**Retrieval changes the memory.** When you recall a memory in a new context, it doesn't just passively hand it back. It compares the retrieval context against the storage context, and if there's enough mismatch, it *reconsolidates*: updates the memory to reflect what's true now. Severe mismatch archives the old version and creates a new one. This is real neuroscience. Nader et al. showed in 2000 that retrieved memories become labile and can be rewritten. Your codebase evolves, and so do Zikkaron's memories of it.
 
-Zikkaron exposes 18 tools over MCP:
+**Memories compete for space.** A pool of engram slots, each with an excitability score that spikes on use and decays over time. When a new memory arrives, it goes to the most excitable slot. Memories in the same slot get temporally linked, creating chains of related experiences even when their content has nothing in common. This models how real neurons allocate engrams through CREB-dependent excitability.
 
-| Tool | What it does |
-|---|---|
-| `remember` | Store a memory (passes through the predictive coding write gate) |
-| `recall` | Semantic + keyword search with heat-weighted ranking |
+**Background consolidation runs like sleep.** When you're idle, an astrocyte daemon wakes up and processes recent experiences. It extracts entities and relationships, builds the knowledge graph, merges near-duplicates, discovers causal chains, and runs "dream replay" where random memory pairs are compared and new connections emerge. Four domain-specialized processes handle different types of knowledge at different rates: code structure, architectural decisions, error patterns, and dependencies.
+
+**A cognitive map organizes everything.** Successor representations build a 2D map of concept space where memories that get accessed in similar contexts cluster together, even if their content is completely different. Debugging memories cluster near other debugging memories. Architecture decisions cluster together. Navigate this map, and you find related knowledge that keyword search would never surface.
+
+## All 23 tools
+
+| Tool | Purpose |
+|------|---------|
+| `remember` | Store a memory through the predictive coding write gate |
+| `recall` | Multi-signal retrieval with heat-weighted ranking |
 | `forget` | Delete a memory |
-| `validate_memory` | Check if a memory is still valid against current file state |
-| `get_project_context` | Get all active memories for a directory |
-| `consolidate_now` | Trigger a consolidation cycle |
-| `memory_stats` | System statistics |
-| `rate_memory` | Give usefulness feedback for metamemory tracking |
-| `recall_hierarchical` | Query the fractal hierarchy at a specific level |
+| `validate_memory` | Check staleness against current file state |
+| `get_project_context` | Get hot memories for a directory |
+| `consolidate_now` | Force a consolidation cycle |
+| `memory_stats` | System statistics across all subsystems |
+| `rate_memory` | Usefulness feedback for metamemory tracking |
+| `recall_hierarchical` | Query the fractal hierarchy at a specific abstraction level |
 | `drill_down` | Navigate into a memory cluster |
-| `create_trigger` | Set a prospective trigger that fires on matching context |
-| `get_project_story` | Get the autobiographical narrative for a project |
-| `add_rule` | Define neuro-symbolic rules for filtering/re-ranking |
+| `create_trigger` | Set prospective triggers that fire on matching context |
+| `get_project_story` | Autobiographical narrative of a project |
+| `add_rule` | Neuro-symbolic constraints for filtering and re-ranking |
 | `get_rules` | List active rules |
-| `navigate_memory` | Traverse concept space using successor representations |
-| `get_causal_chain` | Get causal ancestors/descendants for an entity |
+| `navigate_memory` | Traverse concept space via successor representations |
+| `get_causal_chain` | Causal ancestors and descendants for an entity |
 | `assess_coverage` | Evaluate knowledge coverage with gap identification |
-| `detect_gaps` | Find knowledge gaps: isolated entities, stale regions, missing connections |
+| `detect_gaps` | Find isolated entities, stale regions, missing connections |
+| `checkpoint` | Snapshot working state for compaction recovery |
+| `restore` | Reconstruct context after compaction via Hippocampal Replay |
+| `anchor` | Mark critical facts as compaction-resistant |
+| `install_hooks` | Enable automatic drain/restore on context compaction |
+| `sync_instructions` | Update CLAUDE.md with latest Zikkaron capabilities |
 
 ## Architecture
 
-Zikkaron runs as a local MCP server. All data stays on your machine in a single SQLite database with WAL mode, FTS5 full-text search, and `sqlite-vec` for vector similarity.
+Everything runs locally. A single SQLite database with WAL mode, FTS5 full-text search, and `sqlite-vec` for approximate nearest neighbor vector search.
 
-26 subsystems organized into five tiers:
+26 subsystems organized into five layers:
 
 <details>
 <summary><strong>Core Storage and Retrieval</strong></summary>
 
 | Module | Role |
-|---|---|
-| `storage.py` | SQLite WAL engine with 15 tables, FTS5 indexing, `sqlite-vec` ANN search |
-| `embeddings.py` | Sentence-transformer encoding (`all-MiniLM-L6-v2`) with batched operations |
-| `retrieval.py` | Multi-signal fusion retriever combining vector similarity, FTS5 BM25, knowledge graph PPR, spreading activation, and fractal hierarchy traversal |
-| `models.py` | Pydantic data models for memories, entities, relationships, clusters, rules, and causal edges |
+|--------|------|
+| `storage.py` | SQLite WAL engine, 15 tables, FTS5 indexing, `sqlite-vec` ANN search |
+| `embeddings.py` | Sentence-transformer encoding (`all-MiniLM-L6-v2`), batched operations |
+| `retrieval.py` | Four-signal fusion: vector similarity, FTS5 BM25, knowledge graph PPR, spreading activation |
+| `models.py` | Pydantic data models for the full type hierarchy |
 | `config.py` | Environment-based configuration with `ZIKKARON_` prefix |
 
 </details>
@@ -133,13 +150,13 @@ Zikkaron runs as a local MCP server. All data stays on your machine in a single 
 <summary><strong>Memory Dynamics</strong></summary>
 
 | Module | Role |
-|---|---|
-| `thermodynamics.py` | Heat-based memory salience. Surprise scoring, importance heuristics, emotional valence, and temporal decay govern which memories stay accessible |
-| `reconsolidation.py` | Memories become labile on retrieval and are rewritten based on context mismatch magnitude. Implements the Nader et al. (2000) reconsolidation model with three outcomes: reinforcement, modification, or archival |
-| `predictive_coding.py` | Write gate that only stores prediction errors. Maintains a generative model per directory context and computes surprisal against existing knowledge — redundant information is filtered at ingest |
-| `engram.py` | Competitive memory slot allocation based on CREB-like excitability (Josselyn & Frankland, 2007). High-excitability slots win allocation; temporally proximate memories share engram slots |
-| `compression.py` | Rate-distortion optimal forgetting (Toth et al., 2020). Memories degrade progressively: full fidelity at 0-7 days, gist compression at 7-30 days, semantic tag extraction beyond 30 days |
-| `staleness.py` | File-change watchdog using SHA-256 hashing to detect when source code has diverged from stored memories |
+|--------|------|
+| `thermodynamics.py` | Heat, surprise, importance, emotional valence, temporal decay |
+| `reconsolidation.py` | Labile retrieval with three outcomes per Nader et al. (2000) |
+| `predictive_coding.py` | Write gate that filters redundancy via prediction error |
+| `engram.py` | Competitive slot allocation with CREB-like excitability |
+| `compression.py` | Rate-distortion optimal forgetting over three compression levels |
+| `staleness.py` | File-change watchdog via SHA-256 hash comparison |
 
 </details>
 
@@ -147,12 +164,12 @@ Zikkaron runs as a local MCP server. All data stays on your machine in a single 
 <summary><strong>Consolidation and Organization</strong></summary>
 
 | Module | Role |
-|---|---|
-| `consolidation.py` | Background astrocyte daemon running periodic consolidation cycles: decay application, staleness checks, prospective trigger evaluation |
-| `astrocyte_pool.py` | Domain-specialized consolidation processes (code structure, architectural decisions, error patterns, dependency tracking) running as a worker pool |
-| `sleep_compute.py` | Offline "dream replay" that replays memory pairs to discover cross-project connections, runs Louvain community detection for clustering, and performs temporal compression |
-| `fractal.py` | Hierarchical multi-scale memory tree. Memories cluster at leaf level; clusters merge into intermediate summaries; summaries merge into root abstractions. Supports drill-down navigation |
-| `cls_store.py` | Complementary Learning Systems (McClelland et al., 1995). Dual-store architecture: fast episodic capture in a hippocampal buffer, slow semantic abstraction in a neocortical store with periodic interleaved replay |
+|--------|------|
+| `consolidation.py` | Background astrocyte daemon for periodic consolidation |
+| `astrocyte_pool.py` | Domain-specialized worker processes for code, decisions, errors, deps |
+| `sleep_compute.py` | Dream replay, Louvain community detection, temporal compression |
+| `fractal.py` | Multi-scale memory tree with drill-down navigation |
+| `cls_store.py` | Complementary Learning Systems: fast episodic + slow semantic stores |
 
 </details>
 
@@ -160,12 +177,12 @@ Zikkaron runs as a local MCP server. All data stays on your machine in a single 
 <summary><strong>Knowledge Structure</strong></summary>
 
 | Module | Role |
-|---|---|
-| `knowledge_graph.py` | Typed entity-relationship graph with co-occurrence, causal, and temporal edges. Supports Personalized PageRank for contextual retrieval |
-| `causal_discovery.py` | PC algorithm (Spirtes, Glymour, Scheines, 2000) for discovering causal DAGs from coding session event logs. Conditional independence testing via partial correlation |
-| `cognitive_map.py` | Successor Representation (Stachenfeld et al., 2017) for navigation-based retrieval. Memories that co-occur in similar contexts cluster in SR space, enabling associative traversal even when content differs |
-| `narrative.py` | Autobiographical project stories synthesized from memory timelines, key decisions, and significant events |
-| `curation.py` | Automated memory maintenance: duplicate merging, contradiction detection, cross-reference linking |
+|--------|------|
+| `knowledge_graph.py` | Typed entity-relationship graph with Personalized PageRank |
+| `causal_discovery.py` | PC algorithm for causal DAGs from coding session data |
+| `cognitive_map.py` | Successor Representation for navigation-based retrieval |
+| `narrative.py` | Autobiographical project story synthesis |
+| `curation.py` | Duplicate merging, contradiction detection, cross-reference linking |
 
 </details>
 
@@ -173,18 +190,19 @@ Zikkaron runs as a local MCP server. All data stays on your machine in a single 
 <summary><strong>Frontier Capabilities</strong></summary>
 
 | Module | Role |
-|---|---|
-| `hopfield.py` | Modern continuous Hopfield networks (Ramsauer et al., 2021). Energy-based associative retrieval equivalent to transformer attention: `softmax(beta * X^T * query)` |
-| `hdc_encoder.py` | Hyperdimensional Computing / Vector Symbolic Architecture (Kanerva, 1988). Encodes memories as role-filler bindings in 10,000-dimensional bipolar space for structured queries |
-| `metacognition.py` | Self-assessment of knowledge coverage. Gap detection across five dimensions: isolated entities, stale regions, low-confidence zones, missing connections, one-sided knowledge |
-| `rules_engine.py` | Neuro-symbolic constraints. Hard rules (must satisfy) and soft rules (preference boosts/penalties) scoped to global, directory, or file level |
-| `crdt_sync.py` | Multi-agent memory sharing via CRDTs (OR-Set for collections, LWW-Register for content, G-Counter for access counts). Automatic conflict resolution across agent instances |
-| `prospective.py` | Future-oriented triggers that fire when matching context is detected — directory, keyword, entity, or time-based conditions |
-| `sensory_buffer.py` | Episodic capture buffer for raw session content with configurable token windows and overlap |
+|--------|------|
+| `hopfield.py` | Modern continuous Hopfield networks (Ramsauer et al., 2021) |
+| `hdc_encoder.py` | Hyperdimensional Computing in 10,000-dimensional bipolar space |
+| `metacognition.py` | Self-assessment of knowledge coverage and gap detection |
+| `rules_engine.py` | Hard and soft neuro-symbolic constraints |
+| `crdt_sync.py` | Multi-agent memory sharing via CRDTs |
+| `prospective.py` | Future-oriented triggers on directory, keyword, entity, or time |
+| `sensory_buffer.py` | Episodic capture buffer for raw session content |
+| `restoration.py` | Hippocampal Replay engine for context compaction resilience |
 
 </details>
 
-## Advanced Setup
+## Advanced setup
 
 ### From source
 
@@ -196,13 +214,13 @@ pip install -e .
 
 ### SSE transport
 
-For running as a persistent background server instead of stdio:
+Run as a persistent background server instead of stdio:
 
 ```bash
 zikkaron --transport sse
 ```
 
-Then configure Claude Code to connect via URL:
+Then point Claude Code at the URL:
 
 ```json
 {
@@ -215,25 +233,25 @@ Then configure Claude Code to connect via URL:
 }
 ```
 
-Default port: `8742`. Override with `--port`. Database defaults to `~/.zikkaron/memory.db`, override with `--db-path`.
+Default port is `8742`. Override with `--port`. Database defaults to `~/.zikkaron/memory.db`, override with `--db-path`.
 
 ## Configuration
 
-All settings are configurable via environment variables with the `ZIKKARON_` prefix:
+All settings use the `ZIKKARON_` environment variable prefix:
 
-| Variable | Default | Description |
-|---|---|---|
+| Variable | Default | What it controls |
+|----------|---------|-----------------|
 | `ZIKKARON_PORT` | `8742` | Server port |
 | `ZIKKARON_DB_PATH` | `~/.zikkaron/memory.db` | Database location |
 | `ZIKKARON_EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Sentence-transformer model |
-| `ZIKKARON_DECAY_FACTOR` | `0.95` | Base heat decay per consolidation cycle |
-| `ZIKKARON_COLD_THRESHOLD` | `0.05` | Heat below which memories are candidates for archival |
-| `ZIKKARON_WRITE_GATE_THRESHOLD` | `0.4` | Minimum surprisal to pass the predictive coding write gate |
-| `ZIKKARON_HOPFIELD_BETA` | `8.0` | Hopfield network sharpness parameter |
+| `ZIKKARON_DECAY_FACTOR` | `0.95` | Heat decay per consolidation cycle |
+| `ZIKKARON_COLD_THRESHOLD` | `0.05` | Heat below which memories become archival candidates |
+| `ZIKKARON_WRITE_GATE_THRESHOLD` | `0.4` | Minimum surprisal to pass the write gate |
+| `ZIKKARON_HOPFIELD_BETA` | `8.0` | Hopfield network sharpness |
 | `ZIKKARON_SR_DISCOUNT` | `0.9` | Successor representation discount factor |
-| `ZIKKARON_COGNITIVE_LOAD_LIMIT` | `4` | Maximum chunks in active context (Cowan's 4 +/- 1) |
+| `ZIKKARON_COGNITIVE_LOAD_LIMIT` | `4` | Active context chunk limit (Cowan's 4 +/- 1) |
 
-See `zikkaron/config.py` for the full list.
+Full list in `zikkaron/config.py`.
 
 ## Testing
 
@@ -241,27 +259,40 @@ See `zikkaron/config.py` for the full list.
 python -m pytest zikkaron/tests/ -x -q
 ```
 
-891 tests across 33 test files covering all subsystems.
+905 tests across 34 test files covering every subsystem.
 
 ## References
 
 <details>
-<summary>Academic papers and books that informed the implementation</summary>
+<summary>The papers and books behind the implementation</summary>
 
-- Ramsauer et al. "Hopfield Networks is All You Need" (ICLR 2021, arXiv:2008.02217)
-- Nader, Schafe, LeDoux. "Fear memories require protein synthesis in the amygdala for reconsolidation after retrieval" (Nature 406, 2000)
-- Osan, Tort, Bhatt, Bhatt, Bhatt, Amaral. "Three outcomes of reconsolidation" (PLoS ONE, 2011)
-- McClelland, McNaughton, O'Reilly. "Why there are complementary learning systems in the hippocampus and neocortex" (Psych. Review 102, 1995)
-- Sun et al. "Organizing memories for generalization in complementary learning systems" (Nature Neuroscience 26, 2023)
-- Stachenfeld, Botvinick, Gershman. "The hippocampus as a predictive map" (Nature Neuroscience 20, 2017)
-- Whittington et al. "The Tolman-Eichenbaum Machine" (Cell 183, 2020)
-- Spirtes, Glymour, Scheines. *Causation, Prediction, and Search* (MIT Press, 2000)
-- Kanerva. *Sparse Distributed Memory* (MIT Press, 1988)
-- Frady, Kleyko, Sommer. "Variable Binding for Sparse Distributed Representations" (IEEE TNNLS, 2022)
-- Toth et al. "Optimal forgetting via rate-distortion theory" (PLoS Computational Biology, 2020)
-- Josselyn, Frankland. "Memory allocation: mechanisms and function" (Annual Review Neuroscience 41, 2018)
-- Rashid et al. "Competition between engrams influences fear memory formation and recall" (Science 353, 2016)
-- Zhou et al. "MetaRAG: Metacognitive Retrieval-Augmented Generation" (ACM Web, 2024)
+Ramsauer et al. "Hopfield Networks is All You Need" (ICLR 2021, arXiv:2008.02217)
+
+Nader, Schafe, LeDoux. "Fear memories require protein synthesis in the amygdala for reconsolidation after retrieval" (Nature 406, 2000)
+
+Osan, Tort, Bhatt, Amaral. "Three outcomes of reconsolidation" (PLoS ONE, 2011)
+
+McClelland, McNaughton, O'Reilly. "Why there are complementary learning systems in the hippocampus and neocortex" (Psychological Review 102, 1995)
+
+Sun et al. "Organizing memories for generalization in complementary learning systems" (Nature Neuroscience 26, 2023)
+
+Stachenfeld, Botvinick, Gershman. "The hippocampus as a predictive map" (Nature Neuroscience 20, 2017)
+
+Whittington et al. "The Tolman-Eichenbaum Machine" (Cell 183, 2020)
+
+Spirtes, Glymour, Scheines. *Causation, Prediction, and Search* (MIT Press, 2000)
+
+Kanerva. *Sparse Distributed Memory* (MIT Press, 1988)
+
+Frady, Kleyko, Sommer. "Variable Binding for Sparse Distributed Representations" (IEEE TNNLS, 2022)
+
+Toth et al. "Optimal forgetting via rate-distortion theory" (PLoS Computational Biology, 2020)
+
+Josselyn, Frankland. "Memory allocation: mechanisms and function" (Annual Review Neuroscience 41, 2018)
+
+Rashid et al. "Competition between engrams influences fear memory formation and recall" (Science 353, 2016)
+
+Zhou et al. "MetaRAG: Metacognitive Retrieval-Augmented Generation" (ACM Web, 2024)
 
 </details>
 
