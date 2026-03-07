@@ -461,19 +461,41 @@ class HippoRetriever:
             except Exception:
                 logger.debug("SR retrieval failed, skipping signal")
 
+        # Build signal weights dict
+        signal_weights = {
+            "vector": w_vector, "fts": w_fts, "ppr": w_ppr,
+            "spread": w_spread, "fractal": w_fractal,
+            "hopfield": w_hopfield, "hdc": w_hdc, "sr": w_sr,
+        }
+
+        # Apply confidence gating
+        if getattr(self._settings, 'CONFIDENCE_GATING_ENABLED', False):
+            _conf_name_map = {"spread": "spreading"}
+            thresholds = {
+                "vector": getattr(self._settings, 'CONFIDENCE_THRESHOLD_VECTOR', 0.1),
+                "fts": getattr(self._settings, 'CONFIDENCE_THRESHOLD_FTS', 0.1),
+                "ppr": getattr(self._settings, 'CONFIDENCE_THRESHOLD_PPR', 0.1),
+                "spread": getattr(self._settings, 'CONFIDENCE_THRESHOLD_SPREADING', 0.1),
+                "hopfield": getattr(self._settings, 'CONFIDENCE_THRESHOLD_HOPFIELD', 0.1),
+                "hdc": getattr(self._settings, 'CONFIDENCE_THRESHOLD_HDC', 0.1),
+                "fractal": getattr(self._settings, 'CONFIDENCE_THRESHOLD_FRACTAL', 0.1),
+                "sr": getattr(self._settings, 'CONFIDENCE_THRESHOLD_SR', 0.1),
+            }
+            for sig in list(signal_weights.keys()):
+                ranked = sorted(
+                    [(mid, s[sig]) for mid, s in scores.items() if s[sig] > 0],
+                    key=lambda x: x[1], reverse=True,
+                )
+                conf_name = _conf_name_map.get(sig, sig)
+                confidence = self._compute_signal_confidence(conf_name, ranked)
+                threshold = thresholds.get(sig, 0.1)
+                if confidence < threshold:
+                    signal_weights[sig] = 0.0
+
         # Merge: compute combined score
         combined: list[tuple[int, float]] = []
         for mid, signal_scores in scores.items():
-            total = (
-                w_vector * signal_scores["vector"]
-                + w_fts * signal_scores["fts"]
-                + w_ppr * signal_scores["ppr"]
-                + w_spread * signal_scores["spread"]
-                + w_fractal * signal_scores["fractal"]
-                + w_hopfield * signal_scores["hopfield"]
-                + w_hdc * signal_scores["hdc"]
-                + w_sr * signal_scores["sr"]
-            )
+            total = sum(signal_weights[k] * signal_scores[k] for k in signal_weights)
             combined.append((mid, total))
 
         # Filter by min_heat and sort by combined score
@@ -531,6 +553,65 @@ class HippoRetriever:
         return self._fractal.retrieve_tree(query, target_level=level)[:max_results]
 
     # -- Internal helpers --
+
+    def _compute_signal_confidence(
+        self,
+        signal_name: str,
+        ranked_list: list[tuple[int, float]],
+    ) -> float:
+        """Compute confidence score for a retrieval signal's results.
+
+        Returns a value in [0.0, 1.0] indicating how confident we are
+        that this signal produced meaningful results. Used by confidence
+        gating to zero out unreliable signals before fusion.
+        """
+        if signal_name == "vector":
+            if not ranked_list:
+                return 0.0
+            top_score = ranked_list[0][1]
+            if len(ranked_list) > 1:
+                gap = ranked_list[0][1] - ranked_list[1][1]
+            else:
+                gap = top_score
+            return min(1.0, top_score * (1 + gap))
+
+        elif signal_name == "fts":
+            if not ranked_list:
+                return 0.0
+            return min(1.0, len(ranked_list) / 5.0)
+
+        elif signal_name in ("ppr", "spreading"):
+            if not ranked_list:
+                return 0.0
+            scores = [s for _, s in ranked_list]
+            if len(scores) < 2:
+                return scores[0] if scores else 0.0
+            max_score = max(scores)
+            mean_score = sum(scores) / len(scores)
+            return (max_score - mean_score) / max_score if max_score > 0 else 0.0
+
+        elif signal_name == "hopfield":
+            if not ranked_list:
+                return 0.0
+            scores = [s for _, s in ranked_list]
+            return max(scores)
+
+        elif signal_name == "hdc":
+            if not ranked_list:
+                return 0.0
+            return min(1.0, len(ranked_list) / 5.0)
+
+        elif signal_name == "fractal":
+            if not ranked_list:
+                return 0.0
+            return ranked_list[0][1] if ranked_list else 0.0
+
+        elif signal_name == "sr":
+            if not ranked_list:
+                return 0.0
+            return min(1.0, len(ranked_list) / 3.0)
+
+        return 0.5
 
     def _build_networkx_graph(
         self, seed_entity_ids: list[int], max_hops: int = 3
