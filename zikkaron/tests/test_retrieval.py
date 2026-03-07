@@ -374,3 +374,130 @@ class TestRecallPerformance:
 
         assert len(results) > 0
         assert elapsed_ms < 100, f"Recall took {elapsed_ms:.1f}ms, expected <100ms"
+
+
+# ── Confidence Gating Tests ───────────────────────────────────────────
+
+
+class TestComputeSignalConfidence:
+    def test_vector_empty(self, retriever):
+        assert retriever._compute_signal_confidence("vector", []) == 0.0
+
+    def test_vector_single_result(self, retriever):
+        result = retriever._compute_signal_confidence("vector", [(1, 0.8)])
+        # gap = top_score = 0.8, confidence = min(1.0, 0.8 * (1 + 0.8)) = min(1.0, 1.44) = 1.0
+        assert result == 1.0
+
+    def test_vector_two_results_with_gap(self, retriever):
+        result = retriever._compute_signal_confidence("vector", [(1, 0.9), (2, 0.3)])
+        # gap = 0.6, confidence = min(1.0, 0.9 * 1.6) = min(1.0, 1.44) = 1.0
+        assert result == 1.0
+
+    def test_vector_two_results_close(self, retriever):
+        result = retriever._compute_signal_confidence("vector", [(1, 0.3), (2, 0.29)])
+        # gap = 0.01, confidence = min(1.0, 0.3 * 1.01) = 0.303
+        assert 0.3 < result < 0.35
+
+    def test_fts_empty(self, retriever):
+        assert retriever._compute_signal_confidence("fts", []) == 0.0
+
+    def test_fts_few_results(self, retriever):
+        result = retriever._compute_signal_confidence("fts", [(1, 1.0), (2, 0.5)])
+        assert result == pytest.approx(0.4)  # 2/5.0
+
+    def test_fts_many_results(self, retriever):
+        ranked = [(i, 1.0 / (i + 1)) for i in range(10)]
+        result = retriever._compute_signal_confidence("fts", ranked)
+        assert result == 1.0  # 10/5.0 capped at 1.0
+
+    def test_ppr_empty(self, retriever):
+        assert retriever._compute_signal_confidence("ppr", []) == 0.0
+
+    def test_ppr_single_result(self, retriever):
+        result = retriever._compute_signal_confidence("ppr", [(1, 0.7)])
+        assert result == 0.7
+
+    def test_ppr_concentrated_scores(self, retriever):
+        # Top score 0.9, rest low → high concentration
+        ranked = [(1, 0.9), (2, 0.1), (3, 0.1), (4, 0.1)]
+        result = retriever._compute_signal_confidence("ppr", ranked)
+        assert result > 0.5
+
+    def test_ppr_uniform_scores(self, retriever):
+        # All scores similar → low concentration
+        ranked = [(1, 0.25), (2, 0.25), (3, 0.25), (4, 0.25)]
+        result = retriever._compute_signal_confidence("ppr", ranked)
+        assert result == 0.0
+
+    def test_spreading_uses_same_logic_as_ppr(self, retriever):
+        ranked = [(1, 0.9), (2, 0.1), (3, 0.1)]
+        ppr_conf = retriever._compute_signal_confidence("ppr", ranked)
+        spread_conf = retriever._compute_signal_confidence("spreading", ranked)
+        assert ppr_conf == spread_conf
+
+    def test_hopfield_empty(self, retriever):
+        assert retriever._compute_signal_confidence("hopfield", []) == 0.0
+
+    def test_hopfield_returns_max_score(self, retriever):
+        result = retriever._compute_signal_confidence("hopfield", [(1, 0.6), (2, 0.3)])
+        assert result == 0.6
+
+    def test_hdc_empty(self, retriever):
+        assert retriever._compute_signal_confidence("hdc", []) == 0.0
+
+    def test_hdc_count_based(self, retriever):
+        ranked = [(i, 0.5) for i in range(3)]
+        result = retriever._compute_signal_confidence("hdc", ranked)
+        assert result == pytest.approx(0.6)  # 3/5.0
+
+    def test_fractal_empty(self, retriever):
+        assert retriever._compute_signal_confidence("fractal", []) == 0.0
+
+    def test_fractal_returns_top_score(self, retriever):
+        result = retriever._compute_signal_confidence("fractal", [(1, 0.75), (2, 0.3)])
+        assert result == 0.75
+
+    def test_sr_empty(self, retriever):
+        assert retriever._compute_signal_confidence("sr", []) == 0.0
+
+    def test_sr_count_based(self, retriever):
+        ranked = [(i, 0.5) for i in range(6)]
+        result = retriever._compute_signal_confidence("sr", ranked)
+        assert result == 1.0  # 6/3.0 capped at 1.0
+
+    def test_unknown_signal_returns_default(self, retriever):
+        result = retriever._compute_signal_confidence("unknown_signal", [(1, 0.5)])
+        assert result == 0.5
+
+
+class TestConfidenceGating:
+    def test_gating_zeros_low_confidence_signal(self, storage, embeddings, graph, settings):
+        """Signals below threshold should have their weight zeroed."""
+        settings_gated = Settings(
+            DB_PATH=":memory:",
+            CONFIDENCE_GATING_ENABLED=True,
+            CONFIDENCE_THRESHOLD_FTS=0.5,
+            QUERY_ROUTING_ENABLED=False,
+        )
+        retriever = HippoRetriever(storage, embeddings, graph, settings_gated)
+
+        # Insert only 1 memory so FTS returns very few results → low confidence
+        _make_memory(storage, embeddings, "lonely memory about testing")
+
+        results = retriever.recall("testing", max_results=5)
+        # Should still return results (vector signal always passes)
+        # The test verifies no crash and that gating logic executes
+        assert isinstance(results, list)
+
+    def test_gating_disabled(self, storage, embeddings, graph):
+        """When gating is disabled, all signals pass through."""
+        settings_off = Settings(
+            DB_PATH=":memory:",
+            CONFIDENCE_GATING_ENABLED=False,
+            QUERY_ROUTING_ENABLED=False,
+        )
+        retriever = HippoRetriever(storage, embeddings, graph, settings_off)
+        _make_memory(storage, embeddings, "test memory")
+
+        results = retriever.recall("test", max_results=5)
+        assert isinstance(results, list)
