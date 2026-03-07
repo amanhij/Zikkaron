@@ -515,6 +515,49 @@ class StorageEngine:
         ).fetchall()
         return self._rows_to_dicts(rows)
 
+    def search_memories_by_content_date(
+        self,
+        date_hints: list[str],
+        month_hints: list[str],
+        session_hints: list[str],
+        min_heat: float = 0.0,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Search memory content for temporal references using FTS5."""
+        terms = []
+        for hint in date_hints:
+            terms.append('"' + hint + '"')
+        for hint in month_hints:
+            terms.append(hint)
+        for hint in session_hints:
+            terms.append(hint)
+        if not terms:
+            return []
+        fts_query = " OR ".join(terms)
+        rows = self._conn.execute(
+            "SELECT m.* FROM memories m "
+            "JOIN memories_fts fts ON m.id = fts.rowid "
+            "WHERE memories_fts MATCH ? AND m.heat >= ? "
+            "ORDER BY m.heat DESC LIMIT ?",
+            (fts_query, min_heat, limit),
+        ).fetchall()
+        return self._rows_to_dicts(rows)
+
+    def search_memories_by_timestamp_range(
+        self,
+        start_date: str,
+        end_date: str,
+        min_heat: float = 0.0,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Query memories by created_at timestamp range."""
+        rows = self._conn.execute(
+            "SELECT * FROM memories WHERE created_at >= ? AND created_at <= ? "
+            "AND heat >= ? ORDER BY created_at DESC LIMIT ?",
+            (start_date, end_date, min_heat, limit),
+        ).fetchall()
+        return self._rows_to_dicts(rows)
+
     # -- Vector Search (sqlite-vec) --
 
     def insert_vector(self, memory_id: int, embedding: bytes):
