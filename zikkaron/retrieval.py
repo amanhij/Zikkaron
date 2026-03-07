@@ -422,6 +422,7 @@ class HippoRetriever:
             w_hopfield = 0.13
             w_hdc = 0.12
             w_sr = 0.10
+            w_temporal = 0.0  # Will be dynamically set if temporal markers found
         else:
             w_vector = 0.27
             w_fts = 0.11
@@ -431,12 +432,13 @@ class HippoRetriever:
             w_hopfield = 0.14
             w_hdc = 0.13
             w_sr = 0.0
+            w_temporal = 0.0  # Will be dynamically set if temporal markers found
 
         scores: dict[int, dict] = defaultdict(
             lambda: {
                 "vector": 0.0, "fts": 0.0, "ppr": 0.0,
                 "spread": 0.0, "fractal": 0.0, "hopfield": 0.0,
-                "hdc": 0.0, "sr": 0.0,
+                "hdc": 0.0, "sr": 0.0, "temporal": 0.0,
             }
         )
 
@@ -569,11 +571,31 @@ class HippoRetriever:
             except Exception:
                 logger.debug("SR retrieval failed, skipping signal")
 
+        # 9. Temporal retrieval boost — temporal_retrieval signal
+        if getattr(self._settings, 'TEMPORAL_RETRIEVAL_ENABLED', False):
+            temporal_info = parse_temporal_expression(query)
+            if temporal_info["has_temporal"]:
+                try:
+                    temporal_memories = self._storage.search_memories_by_content_date(
+                        date_hints=temporal_info["date_hints"],
+                        month_hints=temporal_info["month_hints"],
+                        session_hints=temporal_info["session_hints"],
+                        min_heat=min_heat,
+                        limit=max_results * 3,
+                    )
+                    if temporal_memories:
+                        for i, mem in enumerate(temporal_memories):
+                            scores[mem["id"]]["temporal"] = 1.0 / (1 + i)
+                        w_temporal = 0.8
+                except Exception:
+                    logger.debug("Temporal retrieval failed, skipping signal")
+
         # Build signal weights dict
         signal_weights = {
             "vector": w_vector, "fts": w_fts, "ppr": w_ppr,
             "spread": w_spread, "fractal": w_fractal,
             "hopfield": w_hopfield, "hdc": w_hdc, "sr": w_sr,
+            "temporal": w_temporal,
         }
 
         # Apply confidence gating
@@ -588,6 +610,7 @@ class HippoRetriever:
                 "hdc": getattr(self._settings, 'CONFIDENCE_THRESHOLD_HDC', 0.1),
                 "fractal": getattr(self._settings, 'CONFIDENCE_THRESHOLD_FRACTAL', 0.1),
                 "sr": getattr(self._settings, 'CONFIDENCE_THRESHOLD_SR', 0.1),
+                "temporal": getattr(self._settings, 'CONFIDENCE_THRESHOLD_TEMPORAL', 0.1),
             }
             for sig in list(signal_weights.keys()):
                 ranked = sorted(
@@ -715,6 +738,11 @@ class HippoRetriever:
             return ranked_list[0][1] if ranked_list else 0.0
 
         elif signal_name == "sr":
+            if not ranked_list:
+                return 0.0
+            return min(1.0, len(ranked_list) / 3.0)
+
+        elif signal_name == "temporal":
             if not ranked_list:
                 return 0.0
             return min(1.0, len(ranked_list) / 3.0)
