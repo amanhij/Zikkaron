@@ -23,6 +23,7 @@ htmlcov/
 .lockstep/
 *.lockstep.yml
 .lockstep.yml
+lockstep-specs/
 
 .claude/
 
