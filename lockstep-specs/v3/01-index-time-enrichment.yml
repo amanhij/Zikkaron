@@ -1,0 +1,404 @@
+# 01-index-time-enrichment.yml — Index-Time Enrichment Pipeline
+# ConceptNet + COMET-BART + Doc2Query + ProoFVer + FPA noise filter
+version: "1"
+config:
+  agent: claude-code
+  max_retries: 3
+  step_timeout: 600
+  working_directory: "/home/cryptalis/Zikkaron"
+context: |
+  We are implementing an index-time enrichment pipeline that automatically generates
+  implied facts, commonsense inferences, and synthetic queries for every memory at
+  ingestion time. This is the single highest-impact change for open_domain retrieval.
+
+  ## Why
+  Our cross-encoder (ms-marco-MiniLM) is "semantic BM25" — it cannot do multi-hop
+  inference. "Melanie went camping" → "national park?" scores 0.01 because there's
+  zero lexical/semantic overlap. Solution: materialize implied facts at storage time.
+
+  ## Architecture
+  - Storage: zikkaron/storage.py — StorageEngine, SQLite, memories/memories_fts/memory_vectors tables
+  - Config: zikkaron/config.py — Settings dataclass (pydantic_settings)
+  - Embeddings: zikkaron/embeddings.py — EmbeddingEngine (sentence-transformers)
+  - Retrieval: zikkaron/retrieval.py — HippoRetriever with WRRF + FlashRank CE
+  - insert_memory() stores content, embeds, syncs FTS5 and sqlite-vec via triggers
+
+  ## Key constraint
+  Enrichment runs at STORAGE TIME only. Zero cost at query time. All models lazy-loaded.
+
+steps:
+  - name: Add enrichment config settings
+    prompt: |
+      Read zikkaron/config.py fully.
+
+      Add these settings to the Settings class, after the existing FUSION_NORM setting
+      and before model_config:
+
+      ```python
+      # v17 Index-Time Enrichment Settings
+      INDEX_ENRICHMENT_ENABLED: bool = True
+      CONCEPTNET_ENRICHMENT_ENABLED: bool = True
+      CONCEPTNET_MIN_EDGE_WEIGHT: float = 1.0
+      CONCEPTNET_MAX_TERMS: int = 10
+      CONCEPTNET_RELATIONS: str = "IsA,UsedFor,HasProperty,AtLocation,MotivatedByGoal,CausesDesire,CapableOf"
+      COMET_ENRICHMENT_ENABLED: bool = True
+      COMET_MODEL: str = "mismayil/comet-bart-ai2"
+      COMET_NUM_BEAMS: int = 5
+      COMET_TOP_K_PER_RELATION: int = 3
+      COMET_MIN_CONFIDENCE: float = 0.3
+      COMET_RELATIONS: str = "xAttr,xIntent,xWant"
+      DOC2QUERY_ENRICHMENT_ENABLED: bool = True
+      DOC2QUERY_MODEL: str = "doc2query/msmarco-t5-small-v1"
+      DOC2QUERY_NUM_QUERIES: int = 5
+      LOGIC_ENRICHMENT_ENABLED: bool = True
+      FPA_SIMILARITY_THRESHOLD: float = 0.25
+      ENRICHMENT_MIN_CONTENT_LENGTH: int = 20
+      ```
+
+      Do NOT change any existing settings. Add them in a new block.
+    validate:
+      - type: file_contains
+        path: zikkaron/config.py
+        pattern: "INDEX_ENRICHMENT_ENABLED"
+      - type: file_contains
+        path: zikkaron/config.py
+        pattern: "CONCEPTNET_ENRICHMENT_ENABLED"
+      - type: file_contains
+        path: zikkaron/config.py
+        pattern: "COMET_ENRICHMENT_ENABLED"
+      - type: file_contains
+        path: zikkaron/config.py
+        pattern: "DOC2QUERY_ENRICHMENT_ENABLED"
+      - type: file_contains
+        path: zikkaron/config.py
+        pattern: "FPA_SIMILARITY_THRESHOLD"
+      - type: command_passes
+        command: "python3 -c \"from zikkaron.config import Settings; s = Settings(); assert s.INDEX_ENRICHMENT_ENABLED == True; assert s.FPA_SIMILARITY_THRESHOLD == 0.25; print('config ok')\""
+
+  - name: Add enrichment schema columns
+    prompt: |
+      Read zikkaron/storage.py fully.
+
+      In the _migrate_schema() method, add these new columns to the memory_columns list
+      (which already contains things like "surprise_score", "importance", etc.):
+
+      ```python
+      ("enrichment_concepts", "TEXT DEFAULT NULL"),
+      ("enrichment_comet", "TEXT DEFAULT NULL"),
+      ("enrichment_queries", "TEXT DEFAULT NULL"),
+      ("enrichment_logic", "TEXT DEFAULT NULL"),
+      ("enriched_content", "TEXT DEFAULT NULL"),
+      ("enrichment_model_versions", "TEXT DEFAULT NULL"),
+      ```
+
+      Also update the FTS insert trigger to use enriched_content when available.
+      Find the triggers in _init_schema() and change the insert trigger to:
+      ```sql
+      CREATE TRIGGER IF NOT EXISTS memories_fts_insert
+      AFTER INSERT ON memories
+      BEGIN
+          INSERT INTO memories_fts(rowid, content)
+          VALUES (new.id, COALESCE(new.enriched_content, new.content));
+      END
+      ```
+
+      And update the FTS update trigger similarly to use COALESCE(new.enriched_content, new.content).
+
+      IMPORTANT: The triggers use IF NOT EXISTS. To update them, add DROP TRIGGER IF EXISTS
+      statements before the CREATE TRIGGER statements for _fts_insert and _fts_update.
+    validate:
+      - type: file_contains
+        path: zikkaron/storage.py
+        pattern: "enrichment_concepts"
+      - type: file_contains
+        path: zikkaron/storage.py
+        pattern: "enriched_content"
+      - type: file_contains
+        path: zikkaron/storage.py
+        pattern: "COALESCE"
+      - type: command_passes
+        command: "python3 -c \"from zikkaron.storage import StorageEngine; s = StorageEngine('/tmp/test_enrich_schema.db', 768); print('schema ok')\""
+
+  - name: Create enrichment module
+    prompt: |
+      Create a new file zikkaron/enrichment.py.
+
+      This module implements the index-time enrichment pipeline. Structure:
+
+      ```python
+      """Index-time enrichment pipeline for Zikkaron memories.
+
+      Generates implied facts, commonsense inferences, and synthetic queries
+      at storage time to bridge the cue-trigger semantic disconnect.
+      """
+      import json
+      import logging
+      import re
+      from dataclasses import dataclass, field
+      from typing import Optional
+
+      import numpy as np
+
+      from zikkaron.config import Settings
+
+      logger = logging.getLogger(__name__)
+
+
+      @dataclass
+      class EnrichmentResult:
+          concepts: list[str] = field(default_factory=list)
+          comet_inferences: list[str] = field(default_factory=list)
+          queries: list[str] = field(default_factory=list)
+          logic_expansions: list[str] = field(default_factory=list)
+          enriched_content: str = ""
+          model_versions: dict = field(default_factory=dict)
+      ```
+
+      Implement these classes:
+
+      1. **FPAFilter**: Cosine similarity noise filter.
+         - Takes EmbeddingEngine in constructor
+         - `filter(original_embedding: bytes, enrichment_texts: list[str], threshold: float) -> list[str]`
+         - Decode original_embedding from bytes: np.frombuffer(original_embedding, dtype=np.float32)
+         - Encode each enrichment text via embedding engine encode_query()
+         - Compute cosine similarity via dot product (both should be normalized)
+         - Return only texts with similarity >= threshold
+         - Log rejection count at INFO level
+
+      2. **ConceptNetExpander**: Query ConceptNet for related concepts.
+         - Try `conceptnet_lite` import first (local SQLite). If unavailable, try HTTP API
+           `http://api.conceptnet.io/query?node=/c/en/{term}&rel=/r/{relation}&limit=10`.
+           If both fail, use HARDCODED_EXPANSIONS dict for common terms:
+           ```python
+           HARDCODED_EXPANSIONS = {
+               "camping": ["outdoor_activity", "nature", "tent", "hiking", "national_park", "wilderness"],
+               "hiking": ["outdoor_activity", "trail", "nature", "exercise", "mountain", "national_park"],
+               "fishing": ["outdoor_activity", "water", "lake", "river", "nature", "patience"],
+               "painting": ["art", "creative", "visual_art", "canvas", "artistic", "hobby"],
+               "reading": ["book", "literature", "knowledge", "education", "hobby", "library"],
+               "cooking": ["food", "kitchen", "recipe", "culinary", "meal", "hobby"],
+               "gardening": ["plant", "nature", "outdoor_activity", "hobby", "flower", "garden"],
+               "yoga": ["exercise", "meditation", "fitness", "health", "relaxation", "flexibility"],
+               "running": ["exercise", "fitness", "marathon", "jogging", "sport", "cardio"],
+               "swimming": ["water", "exercise", "pool", "sport", "fitness", "aquatic"],
+               "piano": ["music", "instrument", "classical", "keyboard", "musical", "performance"],
+               "violin": ["music", "instrument", "classical", "string", "orchestra", "musical"],
+               "guitar": ["music", "instrument", "string", "acoustic", "musical", "performance"],
+               "photography": ["camera", "art", "visual", "creative", "hobby", "image"],
+               "travel": ["adventure", "tourism", "explore", "vacation", "journey", "destination"],
+               "volunteering": ["charity", "community", "altruism", "helping", "service", "kindness"],
+               "meditation": ["mindfulness", "relaxation", "mental_health", "calm", "peace", "spiritual"],
+               "cycling": ["bicycle", "exercise", "sport", "fitness", "outdoor_activity", "commute"],
+               "dancing": ["music", "art", "performance", "exercise", "rhythm", "movement"],
+               "writing": ["literature", "creative", "author", "storytelling", "hobby", "expression"],
+           }
+           ```
+         - Extract content-bearing nouns/verbs via simple tokenization (lowercase, skip stop words)
+         - Filter edges by weight >= min_edge_weight from config
+         - Cap at max_terms from config per memory
+         - `expand(content: str, settings: Settings) -> list[str]`
+
+      3. **CometInferencer**: COMET-BART commonsense inference.
+         - Lazy-load `mismayil/comet-bart-ai2` using transformers AutoModelForSeq2SeqLM + AutoTokenizer
+         - Check torch.cuda.is_available() for GPU
+         - Extract behavioral predicates from content (sentences with named subjects + verbs)
+         - Generate inferences for xAttr, xIntent, xWant relations
+         - Use beam search (num_beams from config), top_k per relation from config
+         - Filter by softmax confidence >= min_confidence
+         - Cap at 9 total inferences (3 relations x 3 beams)
+         - `infer(content: str, settings: Settings) -> list[str]`
+         - Gracefully handle missing transformers/torch
+
+      4. **Doc2QueryExpander**: Synthetic query generation.
+         - Lazy-load `doc2query/msmarco-t5-small-v1` using transformers
+         - Generate N queries per memory (from config)
+         - Filter duplicates and queries with >80% token overlap with original
+         - `expand(content: str, settings: Settings) -> list[str]`
+         - Gracefully handle missing dependencies
+
+      5. **LogicExpander**: Rule-based natural logic expansion. NO external models.
+         - Hypernym lifting with hardcoded map (Yellowstone→national_park, Bach→classical_music, etc.)
+         - Verb nominalization: "went camping" → "camping trip", "enjoys reading" → "reading hobby"
+         - `expand(content: str) -> list[str]`
+
+      6. **EnrichmentPipeline**: Orchestrator.
+         - Constructor takes Settings and optional EmbeddingEngine
+         - Lazy-initialize sub-components
+         - `enrich(content: str, embedding: bytes, settings: Settings) -> EnrichmentResult`
+         - Run each enabled technique (check config flags), apply FPA filter
+         - Build enriched_content = original + "\n[enrichment] " + terms joined by " | "
+         - Catch all exceptions per-technique so one failure doesn't block others
+         - Skip if content < ENRICHMENT_MIN_CONTENT_LENGTH
+
+      CRITICAL: All models MUST be lazy-loaded. Each technique independently toggleable.
+      Each technique gracefully handles missing deps (return empty list + warning).
+    validate:
+      - type: file_exists
+        target: zikkaron/enrichment.py
+      - type: file_contains
+        path: zikkaron/enrichment.py
+        pattern: "class EnrichmentPipeline"
+      - type: file_contains
+        path: zikkaron/enrichment.py
+        pattern: "class FPAFilter"
+      - type: file_contains
+        path: zikkaron/enrichment.py
+        pattern: "class ConceptNetExpander"
+      - type: file_contains
+        path: zikkaron/enrichment.py
+        pattern: "class CometInferencer"
+      - type: file_contains
+        path: zikkaron/enrichment.py
+        pattern: "class Doc2QueryExpander"
+      - type: file_contains
+        path: zikkaron/enrichment.py
+        pattern: "class LogicExpander"
+      - type: file_contains
+        path: zikkaron/enrichment.py
+        pattern: "class EnrichmentResult"
+      - type: command_passes
+        command: "python3 -c \"from zikkaron.enrichment import EnrichmentPipeline, EnrichmentResult, FPAFilter, ConceptNetExpander, CometInferencer, Doc2QueryExpander, LogicExpander; print('import ok')\""
+
+  - name: Integrate enrichment into storage
+    prompt: |
+      Read zikkaron/storage.py fully, especially the insert_memory() method (around line 425).
+
+      Integrate the enrichment pipeline into insert_memory():
+
+      1. Add a lazy import helper at module level (after the existing imports):
+         ```python
+         _enrichment_pipeline = None
+
+         def _get_enrichment_pipeline(settings, embeddings_engine=None):
+             global _enrichment_pipeline
+             if _enrichment_pipeline is None:
+                 from zikkaron.enrichment import EnrichmentPipeline
+                 _enrichment_pipeline = EnrichmentPipeline(settings, embeddings_engine)
+             return _enrichment_pipeline
+         ```
+
+      2. Add optional parameters to insert_memory: `embeddings_engine=None, settings=None`
+
+      3. After the existing INSERT and FTS enrichment, but before the vector insert,
+         add enrichment logic:
+         ```python
+         # Index-time enrichment
+         enrichment_data = {}
+         if (settings and getattr(settings, 'INDEX_ENRICHMENT_ENABLED', False)
+                 and len(memory["content"]) >= getattr(settings, 'ENRICHMENT_MIN_CONTENT_LENGTH', 20)
+                 and embeddings_engine is not None and embedding is not None):
+             try:
+                 pipeline = _get_enrichment_pipeline(settings, embeddings_engine)
+                 result = pipeline.enrich(memory["content"], embedding, settings)
+                 enrichment_data = {
+                     "enrichment_concepts": json.dumps(result.concepts) if result.concepts else None,
+                     "enrichment_comet": json.dumps(result.comet_inferences) if result.comet_inferences else None,
+                     "enrichment_queries": json.dumps(result.queries) if result.queries else None,
+                     "enrichment_logic": json.dumps(result.logic_expansions) if result.logic_expansions else None,
+                     "enriched_content": result.enriched_content or None,
+                     "enrichment_model_versions": json.dumps(result.model_versions) if result.model_versions else None,
+                 }
+                 if any(v is not None for v in enrichment_data.values()):
+                     set_clauses = []
+                     params = []
+                     for col, val in enrichment_data.items():
+                         if val is not None:
+                             set_clauses.append(f"{col} = ?")
+                             params.append(val)
+                     if set_clauses:
+                         params.append(memory_id)
+                         self._conn.execute(
+                             f"UPDATE memories SET {', '.join(set_clauses)} WHERE id = ?",
+                             params,
+                         )
+                         if enrichment_data.get("enriched_content"):
+                             enriched = self._enrich_content_for_fts(enrichment_data["enriched_content"])
+                             self._conn.execute(
+                                 "UPDATE memories_fts SET content = ? WHERE rowid = ?",
+                                 (enriched, memory_id),
+                             )
+                         self._conn.commit()
+             except Exception as e:
+                 import logging
+                 logging.getLogger(__name__).warning("Enrichment failed: %s", e)
+         ```
+
+      IMPORTANT: Do NOT break existing insert_memory() flow. New parameters are optional.
+      When not provided, insert_memory() works exactly as before.
+    validate:
+      - type: file_contains
+        path: zikkaron/storage.py
+        pattern: "enrichment_pipeline"
+      - type: file_contains
+        path: zikkaron/storage.py
+        pattern: "INDEX_ENRICHMENT_ENABLED"
+      - type: command_passes
+        command: "python3 -c \"from zikkaron.storage import StorageEngine; s = StorageEngine('/tmp/test_enrich_integ.db', 768); mid = s.insert_memory({'content': 'test memory', 'directory_context': '/tmp', 'tags': []}); assert mid > 0; print('insert ok')\""
+
+  - name: Create enrichment tests
+    prompt: |
+      Create zikkaron/tests/test_enrichment.py with unit tests.
+
+      Tests to implement:
+
+      1. test_logic_expander_hypernym: LogicExpander.expand("went camping at Yellowstone")
+         should return terms containing "national_park" or "outdoor".
+
+      2. test_logic_expander_verb_nominalization: LogicExpander.expand("enjoys reading")
+         should return "reading hobby" or similar nominalization.
+
+      3. test_conceptnet_hardcoded_fallback: ConceptNetExpander().expand("camping", Settings())
+         should return terms from HARDCODED_EXPANSIONS like "outdoor_activity", "nature".
+
+      4. test_fpa_filter_accepts_related: With a mock embedding engine that returns similar
+         embeddings for related terms, verify FPA keeps them (cosine > 0.25).
+
+      5. test_fpa_filter_rejects_unrelated: With a mock embedding engine returning distant
+         embeddings, verify FPA rejects them.
+
+      6. test_enrichment_result_dataclass: Verify EnrichmentResult fields and defaults work.
+
+      7. test_enrichment_pipeline_short_content: Content shorter than min length should skip.
+
+      8. test_enrichment_pipeline_logic_only: With only LOGIC_ENRICHMENT_ENABLED=True (and
+         INDEX_ENRICHMENT_ENABLED=True) and all others disabled, only logic expansions populated.
+
+      Use a MockEmbeddingEngine that returns deterministic embeddings based on text hash:
+      ```python
+      class MockEmbeddingEngine:
+          def encode_query(self, text):
+              np.random.seed(abs(hash(text)) % (2**31))
+              emb = np.random.randn(768).astype(np.float32)
+              return emb / np.linalg.norm(emb)
+      ```
+
+      All tests must run WITHOUT GPU or large model downloads.
+    validate:
+      - type: file_exists
+        target: zikkaron/tests/test_enrichment.py
+      - type: file_contains
+        path: zikkaron/tests/test_enrichment.py
+        pattern: "test_logic_expander"
+      - type: file_contains
+        path: zikkaron/tests/test_enrichment.py
+        pattern: "test_fpa_filter"
+      - type: command_passes
+        command: "cd /home/cryptalis/Zikkaron && python3 -m pytest zikkaron/tests/test_enrichment.py -v --tb=short -x 2>&1 | tail -30"
+
+  - name: Verify no regressions
+    prompt: |
+      Run the existing test suite to verify nothing is broken:
+      ```bash
+      cd /home/cryptalis/Zikkaron && python3 -m pytest zikkaron/tests/ -v --tb=short -x
+      ```
+
+      If any existing tests fail, fix the issues. The enrichment integration must not
+      break any existing functionality. Common issues:
+      - insert_memory() signature change breaking callers (new params must be optional)
+      - FTS trigger changes breaking test assertions
+      - Import errors from new module
+
+      Fix all failures before completing this step.
+    validate:
+      - type: command_passes
+        command: "cd /home/cryptalis/Zikkaron && python3 -m pytest zikkaron/tests/ -v --tb=short 2>&1 | tail -5"

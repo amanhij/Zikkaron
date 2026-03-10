@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from zikkaron.storage import StorageEngine
+from zikkaron.storage import StorageEngine, _FTS_STOP_WORDS
 
 
 @pytest.fixture
@@ -146,6 +146,39 @@ class TestFTSSearch:
         results = storage.search_memories_fts("fastapi", min_heat=0.1)
         assert len(results) == 1
         assert results[0]["heat"] == 0.8
+
+
+class TestFTSPreprocessing:
+    def test_fts_camelcase_splitting(self, storage):
+        storage.insert_memory(_make_memory(content="DatabaseConnection pool timeout"))
+        results = storage.search_memories_fts("DatabaseConnection")
+        assert len(results) == 1
+        assert results[0]["content"] == "DatabaseConnection pool timeout"
+
+        # Also findable via a split sub-term
+        results2 = storage.search_memories_fts("Database")
+        assert len(results2) == 1
+
+    def test_fts_snake_case_splitting(self, storage):
+        storage.insert_memory(_make_memory(content="auth_middleware handles tokens"))
+        results = storage.search_memories_fts("auth_middleware")
+        assert len(results) == 1
+
+        # Individual parts are searchable
+        results2 = storage.search_memories_fts("auth")
+        assert len(results2) == 1
+        results3 = storage.search_memories_fts("middleware")
+        assert len(results3) == 1
+
+    def test_fts_stop_words_expanded(self, storage):
+        # Coding-domain stop words should be in the set
+        coding_stops = {"use", "using", "used", "just", "get", "code", "file", "thing"}
+        assert coding_stops.issubset(_FTS_STOP_WORDS)
+
+        # A query of only stop words should fall back to original query
+        storage.insert_memory(_make_memory(content="just use the code"))
+        result = storage.search_memories_fts("just use the code")
+        assert len(result) == 1
 
 
 class TestMemoryHeatFiltering:

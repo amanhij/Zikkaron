@@ -1,9 +1,38 @@
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
 import sqlite_vec
+
+_FTS_STOP_WORDS = frozenset({
+    # Standard English stop words
+    "a", "an", "the", "is", "it", "in", "on", "at", "to", "of",
+    "for", "and", "or", "but", "not", "with", "by", "from", "as",
+    "be", "was", "were", "been", "are", "am", "do", "did", "does",
+    "has", "had", "have", "will", "would", "could", "should", "may",
+    "can", "this", "that", "these", "those", "what", "which", "who",
+    "how", "when", "where", "why", "if", "then", "so", "no", "yes",
+    "all", "any", "some", "my", "your", "its", "our", "their", "we",
+    "he", "she", "they", "me", "him", "her", "us", "them",
+    # Coding/conversation domain stop words
+    "use", "using", "used", "like", "just", "get", "got", "set",
+    "make", "made", "let", "try", "need", "want", "know", "think",
+    "code", "file", "thing", "stuff",
+})
+
+_CAMEL_CASE_RE = re.compile(r'([a-z])([A-Z])')
+
+_enrichment_pipeline = None
+
+
+def _get_enrichment_pipeline(settings, embeddings_engine=None):
+    global _enrichment_pipeline
+    if _enrichment_pipeline is None:
+        from zikkaron.enrichment import EnrichmentPipeline
+        _enrichment_pipeline = EnrichmentPipeline(settings, embeddings_engine)
+    return _enrichment_pipeline
 
 
 class StorageEngine:
@@ -116,13 +145,79 @@ class StorageEngine:
         except sqlite3.OperationalError:
             pass  # already exists
 
-        # Triggers for FTS sync
+        # Implicit embedding vec0 table for dual-vector architecture
+        try:
+            c.execute(
+                f"CREATE VIRTUAL TABLE memory_implicit_vectors USING vec0("
+                f"embedding float[{self._embedding_dim}])"
+            )
+        except sqlite3.OperationalError:
+            pass  # already exists
+
+        # -- user_profiles table --
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS user_profiles(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_name TEXT NOT NULL,
+                attribute_type TEXT NOT NULL,
+                attribute_key TEXT NOT NULL,
+                attribute_value TEXT NOT NULL,
+                evidence_memory_ids TEXT DEFAULT '[]',
+                confidence REAL DEFAULT 0.5,
+                created_at TEXT,
+                updated_at TEXT,
+                directory_context TEXT,
+                UNIQUE(entity_name, attribute_type, attribute_key, directory_context)
+            )
+        """)
+
+        # -- derived_beliefs table --
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS derived_beliefs(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                belief_type TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                content TEXT NOT NULL,
+                evidence_memory_ids TEXT DEFAULT '[]',
+                confidence REAL DEFAULT 0.5,
+                embedding BLOB,
+                embedding_model TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                directory_context TEXT
+            )
+        """)
+
+        # FTS5 for profiles
+        try:
+            c.execute(
+                "CREATE VIRTUAL TABLE profiles_fts USING fts5("
+                "entity_name, attribute_type, attribute_key, attribute_value, "
+                "content=user_profiles, content_rowid=id)"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+        # FTS5 for beliefs
+        try:
+            c.execute(
+                "CREATE VIRTUAL TABLE beliefs_fts USING fts5("
+                "subject, belief_type, content, "
+                "content=derived_beliefs, content_rowid=id)"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+        # Triggers for FTS sync — drop first to allow updates
+        c.execute("DROP TRIGGER IF EXISTS memories_fts_insert")
+        c.execute("DROP TRIGGER IF EXISTS memories_fts_update")
         for trigger_sql in [
             """
             CREATE TRIGGER IF NOT EXISTS memories_fts_insert
             AFTER INSERT ON memories
             BEGIN
-                INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
+                INSERT INTO memories_fts(rowid, content)
+                VALUES (new.id, new.content);
             END
             """,
             """
@@ -180,6 +275,16 @@ class StorageEngine:
             ("vector_clock", "TEXT DEFAULT '{}'"),
             ("is_protected", "INTEGER DEFAULT 0"),
             ("slot_index", "INTEGER"),
+            # enrichment pipeline columns
+            ("enrichment_concepts", "TEXT DEFAULT NULL"),
+            ("enrichment_comet", "TEXT DEFAULT NULL"),
+            ("enrichment_queries", "TEXT DEFAULT NULL"),
+            ("enrichment_logic", "TEXT DEFAULT NULL"),
+            ("enriched_content", "TEXT DEFAULT NULL"),
+            ("enrichment_model_versions", "TEXT DEFAULT NULL"),
+            # v25 dual-vector columns
+            ("implicit_embedding", "BLOB DEFAULT NULL"),
+            ("implicit_embedding_model", "TEXT DEFAULT NULL"),
         ]
         for col_name, col_def in memory_columns:
             try:
@@ -362,7 +467,7 @@ class StorageEngine:
         if row is None:
             return None
         d = dict(row)
-        for json_field in ("tags", "key_decisions", "key_events", "memory_ids", "entity_ids"):
+        for json_field in ("tags", "key_decisions", "key_events", "memory_ids", "entity_ids", "evidence_memory_ids"):
             if json_field in d and isinstance(d[json_field], str):
                 d[json_field] = json.loads(d[json_field])
         for bool_field in ("archived", "is_stale", "is_prospective", "is_causal", "is_active", "compressed", "is_protected", "is_validated"):
@@ -403,7 +508,7 @@ class StorageEngine:
 
     # -- Memories --
 
-    def insert_memory(self, memory: dict) -> int:
+    def insert_memory(self, memory: dict, embeddings_engine=None, settings=None) -> int:
         tags_json = json.dumps(memory.get("tags", []))
         now = self._now_iso()
         embedding = memory.get("embedding")
@@ -429,6 +534,71 @@ class StorageEngine:
         )
         self._conn.commit()
         memory_id = cur.lastrowid
+        # Enrich FTS content with split identifiers
+        enriched = self._enrich_content_for_fts(memory["content"])
+        if enriched != memory["content"]:
+            self._conn.execute(
+                "UPDATE memories_fts SET content = ? WHERE rowid = ?",
+                (enriched, memory_id),
+            )
+            self._conn.commit()
+        # Index-time enrichment
+        enrichment_data = {}
+        if (settings and getattr(settings, 'INDEX_ENRICHMENT_ENABLED', False)
+                and len(memory["content"]) >= getattr(settings, 'ENRICHMENT_MIN_CONTENT_LENGTH', 20)
+                and embeddings_engine is not None and embedding is not None):
+            try:
+                pipeline = _get_enrichment_pipeline(settings, embeddings_engine)
+                result = pipeline.enrich(memory["content"], embedding, settings)
+                enrichment_data = {
+                    "enrichment_concepts": json.dumps(result.concepts) if result.concepts else None,
+                    "enrichment_comet": json.dumps(result.comet_inferences) if result.comet_inferences else None,
+                    "enrichment_queries": json.dumps(result.queries) if result.queries else None,
+                    "enrichment_logic": json.dumps(result.logic_expansions) if result.logic_expansions else None,
+                    "enriched_content": result.enriched_content or None,
+                    "enrichment_model_versions": json.dumps(result.model_versions) if result.model_versions else None,
+                }
+                if any(v is not None for v in enrichment_data.values()):
+                    set_clauses = []
+                    params = []
+                    for col, val in enrichment_data.items():
+                        if val is not None:
+                            set_clauses.append(f"{col} = ?")
+                            params.append(val)
+                    if set_clauses:
+                        params.append(memory_id)
+                        self._conn.execute(
+                            f"UPDATE memories SET {', '.join(set_clauses)} WHERE id = ?",
+                            params,
+                        )
+                        # Re-embed with enriched content for better semantic matching
+                        # (FTS stays clean with original content only)
+                        if enrichment_data.get("enriched_content") and embeddings_engine is not None:
+                            new_embedding = embeddings_engine.encode_document_enriched(
+                                memory["content"], enrichment_data["enriched_content"]
+                            )
+                            if new_embedding is not None:
+                                self._conn.execute(
+                                    "UPDATE memories SET embedding = ? WHERE id = ?",
+                                    (new_embedding, memory_id),
+                                )
+                        self._conn.commit()
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning("Enrichment failed: %s", e)
+
+        # Profile extraction
+        if (settings and getattr(settings, 'PROFILE_EXTRACTION_ENABLED', False)):
+            try:
+                from zikkaron.profiles import ProfileExtractor
+                extractor = ProfileExtractor(self, settings)
+                extractor.extract_and_store(
+                    memory["content"], memory_id, memory["directory_context"]
+                )
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning("Profile extraction failed: %s", e)
+
         # Also insert into sqlite-vec for vector search
         if embedding is not None:
             self.insert_vector(memory_id, embedding)
@@ -447,17 +617,90 @@ class StorageEngine:
         ).fetchall()
         return self._rows_to_dicts(rows)
 
+    def _enrich_content_for_fts(self, content: str) -> str:
+        """Enrich content with split identifier tokens for better FTS matching."""
+        tokens = content.split()
+        extra_tokens = []
+        for token in tokens:
+            split = _CAMEL_CASE_RE.sub(r'\1 \2', token)
+            split = split.replace('_', ' ')
+            sub_tokens = split.split()
+            if len(sub_tokens) > 1:
+                extra_tokens.extend(t for t in sub_tokens if t != token)
+        if extra_tokens:
+            return content + " " + " ".join(extra_tokens)
+        return content
+
+    def _preprocess_fts_query(self, query: str) -> str:
+        """Preprocess a query string for FTS5 MATCH with identifier splitting and stop word removal."""
+        parts = []
+        raw_tokens = query.split()
+
+        for token in raw_tokens:
+            # Strip FTS5-unsafe punctuation (?, !, ;, etc.) from token edges
+            token = token.strip('?!,;:()[]{}"\'"')
+            if not token:
+                continue
+
+            # Determine if this token looks like an entity
+            is_entity = (
+                token[0:1].isupper()
+                or '_' in token
+                or '.' in token
+            ) if token else False
+
+            # Split identifiers: CamelCase, snake_case, dotted
+            split_term = _CAMEL_CASE_RE.sub(r'\1 \2', token)
+            split_term = split_term.replace('_', ' ').replace('.', ' ')
+            sub_tokens = split_term.split()
+
+            # Filter: remove stop words and short terms
+            filtered = [
+                t for t in sub_tokens
+                if t.lower() not in _FTS_STOP_WORDS and len(t) >= 2
+            ]
+
+            # If entity, add quoted phrase match for original term
+            if is_entity and len(token) >= 2:
+                parts.append(f'"{token}"')
+
+            parts.extend(filtered)
+
+        if not parts:
+            return query
+
+        return " OR ".join(parts)
+
     def search_memories_fts(
         self, query: str, min_heat: float = 0.1, limit: int = 5
     ) -> list[dict]:
+        fts_query = self._preprocess_fts_query(query)
         rows = self._conn.execute(
             "SELECT m.* FROM memories m "
             "JOIN memories_fts fts ON m.id = fts.rowid "
             "WHERE memories_fts MATCH ? AND m.heat >= ? "
             "ORDER BY m.heat DESC LIMIT ?",
-            (query, min_heat, limit),
+            (fts_query, min_heat, limit),
         ).fetchall()
         return self._rows_to_dicts(rows)
+
+    def search_memories_fts_scored(
+        self, query: str, min_heat: float = 0.1, limit: int = 50
+    ) -> list[tuple[int, float]]:
+        """FTS5 search returning (memory_id, bm25_score) tuples.
+
+        BM25 scores from FTS5 are negative (more negative = better match).
+        We negate them so higher = better.
+        """
+        fts_query = self._preprocess_fts_query(query)
+        rows = self._conn.execute(
+            "SELECT m.id, -bm25(memories_fts) as score FROM memories m "
+            "JOIN memories_fts fts ON m.id = fts.rowid "
+            "WHERE memories_fts MATCH ? AND m.heat >= ? "
+            "ORDER BY score DESC LIMIT ?",
+            (fts_query, min_heat, limit),
+        ).fetchall()
+        return [(row[0], row[1]) for row in rows]
 
     def update_memory_heat(self, memory_id: int, new_heat: float):
         self._conn.execute(
@@ -558,6 +801,37 @@ class StorageEngine:
         ).fetchall()
         return self._rows_to_dicts(rows)
 
+    def search_memories_by_month(
+        self,
+        month_hints: list[str],
+        min_heat: float = 0.0,
+        limit: int = 200,
+    ) -> list[int]:
+        """Find memory IDs whose created_at falls in the given month(s).
+
+        month_hints: list of month names like ['may', 'june'].
+        Returns list of memory IDs.
+        """
+        month_map = {
+            "january": "01", "february": "02", "march": "03", "april": "04",
+            "may": "05", "june": "06", "july": "07", "august": "08",
+            "september": "09", "october": "10", "november": "11", "december": "12",
+        }
+        conditions = []
+        for hint in month_hints:
+            mm = month_map.get(hint.lower())
+            if mm:
+                # Match ISO dates like 2023-05-...
+                conditions.append(f"substr(created_at, 6, 2) = '{mm}'")
+        if not conditions:
+            return []
+        where = " OR ".join(conditions)
+        rows = self._conn.execute(
+            f"SELECT id FROM memories WHERE ({where}) AND heat >= ? LIMIT ?",
+            (min_heat, limit),
+        ).fetchall()
+        return [r[0] for r in rows]
+
     # -- Vector Search (sqlite-vec) --
 
     def insert_vector(self, memory_id: int, embedding: bytes):
@@ -580,6 +854,33 @@ class StorageEngine:
         self.delete_vector(memory_id)
         self.insert_vector(memory_id, embedding)
 
+    def insert_implicit_vector(self, memory_id: int, embedding: bytes):
+        """Insert an embedding into the memory_implicit_vectors vec0 table."""
+        self._conn.execute(
+            "INSERT INTO memory_implicit_vectors(rowid, embedding) VALUES (?, ?)",
+            (memory_id, embedding),
+        )
+        self._conn.commit()
+
+    def search_implicit_vectors(
+        self,
+        query_embedding: bytes,
+        top_k: int = 10,
+    ) -> list[tuple[int, float]]:
+        """KNN search over implicit embedding vectors.
+
+        Returns list of (memory_id, distance) tuples sorted by ascending distance.
+        """
+        fetch_k = min(top_k * 4, 4096)
+        rows = self._conn.execute(
+            "SELECT v.rowid, v.distance "
+            "FROM memory_implicit_vectors v "
+            "WHERE v.embedding MATCH ? AND k = ? "
+            "ORDER BY v.distance",
+            (query_embedding, fetch_k),
+        ).fetchall()
+        return [(row[0], row[1]) for row in rows[:top_k]]
+
     def search_vectors(
         self,
         query_embedding: bytes,
@@ -591,7 +892,7 @@ class StorageEngine:
         Returns list of (memory_id, distance) tuples sorted by ascending distance.
         """
         # Fetch more candidates than needed so we have enough after heat filtering
-        fetch_k = top_k * 4
+        fetch_k = min(top_k * 4, 4096)  # sqlite-vec KNN limit is 4096
         rows = self._conn.execute(
             "SELECT v.rowid, v.distance, m.heat "
             "FROM memory_vectors v "
@@ -1404,6 +1705,148 @@ class StorageEngine:
         """Increment and return the new epoch number."""
         current = self.get_current_epoch()
         return current + 1
+
+    # -- User Profiles --
+
+    def insert_profile(
+        self,
+        entity_name: str,
+        attribute_type: str,
+        attribute_key: str,
+        attribute_value: str,
+        memory_id: int | None = None,
+        confidence: float = 0.5,
+        directory_context: str | None = None,
+    ) -> int:
+        now = self._now_iso()
+        # Check if profile already exists
+        existing = self._conn.execute(
+            "SELECT id, confidence, evidence_memory_ids FROM user_profiles "
+            "WHERE entity_name = ? AND attribute_type = ? AND attribute_key = ? "
+            "AND directory_context IS ?",
+            (entity_name, attribute_type, attribute_key, directory_context),
+        ).fetchone()
+
+        if existing:
+            row = dict(existing)
+            new_confidence = min(row["confidence"] + 0.1, 1.0)
+            evidence = json.loads(row["evidence_memory_ids"]) if isinstance(row["evidence_memory_ids"], str) else row["evidence_memory_ids"]
+            if memory_id is not None and memory_id not in evidence:
+                evidence.append(memory_id)
+            self._conn.execute(
+                "UPDATE user_profiles SET attribute_value = ?, confidence = ?, "
+                "evidence_memory_ids = ?, updated_at = ? WHERE id = ?",
+                (attribute_value, new_confidence, json.dumps(evidence), now, row["id"]),
+            )
+            # Sync FTS
+            self._conn.execute(
+                "INSERT INTO profiles_fts(profiles_fts, rowid, entity_name, attribute_type, attribute_key, attribute_value) "
+                "VALUES('delete', ?, ?, ?, ?, ?)",
+                (row["id"], entity_name, attribute_type, attribute_key, attribute_value),
+            )
+            self._conn.execute(
+                "INSERT INTO profiles_fts(rowid, entity_name, attribute_type, attribute_key, attribute_value) "
+                "VALUES(?, ?, ?, ?, ?)",
+                (row["id"], entity_name, attribute_type, attribute_key, attribute_value),
+            )
+            self._conn.commit()
+            return row["id"]
+
+        evidence = [memory_id] if memory_id is not None else []
+        cursor = self._conn.execute(
+            "INSERT INTO user_profiles "
+            "(entity_name, attribute_type, attribute_key, attribute_value, "
+            "evidence_memory_ids, confidence, created_at, updated_at, directory_context) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (entity_name, attribute_type, attribute_key, attribute_value,
+             json.dumps(evidence), confidence, now, now, directory_context),
+        )
+        row_id = cursor.lastrowid
+        # Sync FTS
+        self._conn.execute(
+            "INSERT INTO profiles_fts(rowid, entity_name, attribute_type, attribute_key, attribute_value) "
+            "VALUES(?, ?, ?, ?, ?)",
+            (row_id, entity_name, attribute_type, attribute_key, attribute_value),
+        )
+        self._conn.commit()
+        return row_id
+
+    def search_profiles_fts(self, query: str, limit: int = 10) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT u.* FROM profiles_fts f "
+            "JOIN user_profiles u ON f.rowid = u.id "
+            "WHERE profiles_fts MATCH ? LIMIT ?",
+            (query, limit),
+        ).fetchall()
+        return self._rows_to_dicts(rows)
+
+    def get_profiles_for_entity(self, entity_name: str, directory_context: str | None = None) -> list[dict]:
+        if directory_context is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM user_profiles WHERE entity_name = ? AND directory_context = ?",
+                (entity_name, directory_context),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM user_profiles WHERE entity_name = ?",
+                (entity_name,),
+            ).fetchall()
+        return self._rows_to_dicts(rows)
+
+    # -- Derived Beliefs --
+
+    def insert_belief(
+        self,
+        belief_type: str,
+        subject: str,
+        content: str,
+        evidence_memory_ids: list[int] | None = None,
+        confidence: float = 0.5,
+        embedding: bytes | None = None,
+        embedding_model: str | None = None,
+        directory_context: str | None = None,
+    ) -> int:
+        now = self._now_iso()
+        evidence = evidence_memory_ids or []
+        cursor = self._conn.execute(
+            "INSERT INTO derived_beliefs "
+            "(belief_type, subject, content, evidence_memory_ids, confidence, "
+            "embedding, embedding_model, created_at, updated_at, directory_context) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (belief_type, subject, content, json.dumps(evidence), confidence,
+             embedding, embedding_model, now, now, directory_context),
+        )
+        row_id = cursor.lastrowid
+        # Sync FTS
+        self._conn.execute(
+            "INSERT INTO beliefs_fts(rowid, subject, belief_type, content) "
+            "VALUES(?, ?, ?, ?)",
+            (row_id, subject, belief_type, content),
+        )
+        self._conn.commit()
+        return row_id
+
+    def search_beliefs_fts(self, query: str, limit: int = 10) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT b.* FROM beliefs_fts f "
+            "JOIN derived_beliefs b ON f.rowid = b.id "
+            "WHERE beliefs_fts MATCH ? LIMIT ?",
+            (query, limit),
+        ).fetchall()
+        return self._rows_to_dicts(rows)
+
+    def get_beliefs_for_subject(self, subject: str, directory_context: str | None = None) -> list[dict]:
+        if directory_context is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM derived_beliefs WHERE subject = ? AND directory_context = ?",
+                (subject, directory_context),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM derived_beliefs WHERE subject = ?",
+                (subject,),
+            ).fetchall()
+        return self._rows_to_dicts(rows)
 
     def close(self):
         self._conn.close()

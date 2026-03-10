@@ -1,0 +1,65 @@
+# 05-cross-encoder-reranking.yml — Cross-Encoder Reranking
+version: "1"
+config:
+  agent: claude-code
+  max_retries: 3
+  step_timeout: 600
+  working_directory: "/home/cryptalis/Zikkaron"
+context: |
+  We are adding optional cross-encoder reranking as a post-WRRF signal.
+
+  ## Problem
+  The heuristic reranker (term coverage + exact match) is lightweight but limited.
+  Cross-encoders jointly encode query+document for much better relevance scoring.
+
+  ## Solution
+  1. Add an optional cross-encoder reranker (disabled by default)
+  2. When enabled, rerank top-K WRRF results using cross-encoder scoring
+  3. Use ms-marco-MiniLM-L-6-v2 (lightweight, fast)
+
+  ## Config settings already in config.py:
+  CROSS_ENCODER_MODEL, CROSS_ENCODER_ENABLED, CROSS_ENCODER_TOP_K
+
+  ## Files to Modify
+  - zikkaron/retrieval.py — Add cross-encoder reranking step
+
+steps:
+  - name: Add cross-encoder reranker method
+    prompt: |
+      Read zikkaron/retrieval.py fully.
+
+      Add a method `_cross_encoder_rerank` to HippoRetriever:
+
+      ```python
+      def _cross_encoder_rerank(self, memories: list[dict], query: str,
+                                 top_k: int | None = None) -> list[dict]:
+          """Rerank memories using a cross-encoder model.
+
+          Only runs if CROSS_ENCODER_ENABLED is True in settings.
+          Falls back gracefully if the model can't be loaded.
+          """
+      ```
+
+      Implementation:
+      1. Try to import sentence_transformers.CrossEncoder
+      2. If import fails, log a warning and return memories unchanged
+      3. Load model lazily (store on self._cross_encoder, create on first use)
+      4. Score each (query, memory['content']) pair
+      5. Sort by cross-encoder score descending
+      6. Combine: final_score = 0.5 * _retrieval_score + 0.5 * cross_encoder_score (normalized)
+      7. Return top_k results
+
+      Then in recall(), after the heuristic reranker block, add:
+      ```python
+      if getattr(self._settings, 'CROSS_ENCODER_ENABLED', False):
+          result_memories = self._cross_encoder_rerank(result_memories, query)
+      ```
+    validate:
+      - type: file_contains
+        path: zikkaron/retrieval.py
+        pattern: "_cross_encoder_rerank"
+      - type: file_contains
+        path: zikkaron/retrieval.py
+        pattern: "CROSS_ENCODER"
+      - type: command_passes
+        command: "python3 -c \"from zikkaron.retrieval import HippoRetriever; print('import ok')\""

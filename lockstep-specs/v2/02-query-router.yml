@@ -1,0 +1,101 @@
+# 02-query-router.yml — Query Router
+version: "1"
+config:
+  agent: claude-code
+  max_retries: 3
+  step_timeout: 600
+  working_directory: "/home/cryptalis/Zikkaron"
+context: |
+  We are adding query-dependent signal routing to Zikkaron's retrieval.
+
+  ## Problem
+  All queries use the same signal weights, but different query types benefit
+  from different signals (temporal queries need time-based signals, code queries
+  need exact match, etc.)
+
+  ## Solution
+  1. Classify queries into types: simple, temporal, code, relational, complex
+  2. Adjust WRRF signal weights based on query type
+  3. Skip unnecessary signals for simple queries
+
+  ## Config settings already in config.py:
+  QUERY_ROUTING_ENABLED, TEMPORAL_KEYWORDS, CODE_KEYWORDS, RELATIONAL_KEYWORDS
+
+  ## Files to Modify
+  - zikkaron/retrieval.py — Add analyze_query function and integrate into recall()
+
+steps:
+  - name: Implement analyze_query function
+    prompt: |
+      Read zikkaron/retrieval.py fully.
+
+      Add a module-level function `analyze_query`:
+
+      ```python
+      def analyze_query(query: str, settings) -> dict:
+          """Analyze a query and classify it for signal routing.
+
+          Returns dict with:
+          - query_type: str — one of 'simple', 'temporal', 'code', 'relational', 'complex', 'factoid', 'keyword'
+          - enabled_signals: list[str] — which signals to activate
+          - temporal_markers: list[str] — temporal expressions found
+          - named_entities: list[str] — entities detected
+          - code_identifiers: list[str] — code identifiers found
+          - has_relational_intent: bool
+          """
+      ```
+
+      Implementation:
+      1. Check for temporal keywords from settings.TEMPORAL_KEYWORDS (comma-separated string).
+      2. Check for code keywords from settings.CODE_KEYWORDS.
+      3. Check for relational keywords from settings.RELATIONAL_KEYWORDS.
+      4. Classify:
+         - If temporal markers found → 'temporal', enable ['vector', 'fts']
+         - If code identifiers found → 'code', enable ['vector', 'fts']
+         - If relational intent → 'relational', enable ['vector', 'fts', 'ppr', 'spreading']
+         - If query is short (< 5 words) → 'simple' or 'keyword', enable ['vector', 'fts']
+         - If question word present → 'factoid', enable ['vector', 'fts', 'ppr']
+         - Default → 'complex', enable all signals
+      5. Named entities: words starting with uppercase (excluding first word).
+    validate:
+      - type: file_contains
+        path: zikkaron/retrieval.py
+        pattern: "def analyze_query"
+      - type: file_contains
+        path: zikkaron/retrieval.py
+        pattern: "query_type"
+      - type: command_passes
+        command: "python3 -c \"from zikkaron.retrieval import analyze_query; from zikkaron.config import Settings; r = analyze_query('What database are we using?', Settings()); print(r); assert r['query_type'] in ('simple', 'factoid', 'keyword', 'complex')\""
+
+  - name: Integrate query router into recall()
+    prompt: |
+      Read zikkaron/retrieval.py fully. Focus on the recall() method.
+
+      At the TOP of recall(), after computing candidate_k or before signal retrieval,
+      add query routing:
+
+      ```python
+      if self._settings.QUERY_ROUTING_ENABLED:
+          query_analysis = analyze_query(query, self._settings)
+          enabled_signals = set(query_analysis.get("enabled_signals", []))
+      else:
+          enabled_signals = None  # None means all signals enabled
+      ```
+
+      Then wrap each signal's retrieval block with a check:
+      ```python
+      if enabled_signals is None or "signal_name" in enabled_signals:
+          # ... existing signal retrieval code ...
+      ```
+
+      This allows skipping expensive signals (PPR, spreading, HDC) for simple queries.
+      Do NOT change any signal's actual implementation.
+    validate:
+      - type: file_contains
+        path: zikkaron/retrieval.py
+        pattern: "enabled_signals"
+      - type: file_contains
+        path: zikkaron/retrieval.py
+        pattern: "QUERY_ROUTING_ENABLED"
+      - type: command_passes
+        command: "python3 -c \"from zikkaron.retrieval import HippoRetriever; print('import ok')\""

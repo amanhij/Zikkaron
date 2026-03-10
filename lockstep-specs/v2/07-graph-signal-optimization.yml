@@ -1,0 +1,88 @@
+# 07-graph-signal-optimization.yml — Graph Signal Optimization
+version: "1"
+config:
+  agent: claude-code
+  max_retries: 3
+  step_timeout: 600
+  working_directory: "/home/cryptalis/Zikkaron"
+context: |
+  We are optimizing the graph-based retrieval signals (PPR and spreading activation).
+
+  ## Problem
+  - PPR runs on all queries, even when the graph is too sparse to be useful
+  - No hop depth limit — traversal can explore irrelevant subgraphs
+  - Entity extraction includes many low-quality matches (common words)
+  - Spreading activation uses a fixed spread_factor of 0.5
+
+  ## Solution
+  1. Add graph sparsity detection — skip PPR when graph is too sparse
+  2. Limit PPR traversal to 2-hop subgraphs
+  3. Improve entity matching quality for PPR seeding
+  4. Add edge weight thresholding to prune weak connections
+  5. Make spreading activation decay configurable
+
+  ## Config settings already in config.py:
+  GRAPH_MAX_HOPS, GRAPH_MIN_EDGE_WEIGHT, GRAPH_SPREADING_DECAY,
+  GRAPH_SPREADING_MAX_DEPTH, GRAPH_ENTITY_MIN_LENGTH
+
+  ## Files to Modify
+  - zikkaron/retrieval.py — PPR and spreading improvements
+
+steps:
+  - name: Optimize PPR subgraph construction
+    prompt: |
+      Read zikkaron/retrieval.py fully. Focus on _build_networkx_graph and ppr_retrieve.
+
+      Make these changes:
+
+      1. In `_build_networkx_graph`, use self._settings.GRAPH_MAX_HOPS instead of
+         the `max_hops` parameter default. Change the default value of max_hops to
+         None, and if None, use self._settings.GRAPH_MAX_HOPS.
+
+      2. In `_build_networkx_graph`, skip edges with weight below
+         self._settings.GRAPH_MIN_EDGE_WEIGHT:
+         ```python
+         if weight < self._settings.GRAPH_MIN_EDGE_WEIGHT:
+             continue
+         ```
+
+      3. In `ppr_retrieve`, filter query entities by minimum length:
+         ```python
+         if len(term) < self._settings.GRAPH_ENTITY_MIN_LENGTH:
+             continue
+         ```
+
+      4. In `spreading_activation`, use self._settings.GRAPH_SPREADING_DECAY
+         and self._settings.GRAPH_SPREADING_MAX_DEPTH instead of the hardcoded
+         parameters. Change the default values of spread_factor and max_depth
+         to None, and if None, use the settings values.
+
+      These are minimal, surgical changes. Do NOT restructure the methods.
+    validate:
+      - type: file_contains
+        path: zikkaron/retrieval.py
+        pattern: "GRAPH_MAX_HOPS"
+      - type: file_contains
+        path: zikkaron/retrieval.py
+        pattern: "GRAPH_MIN_EDGE_WEIGHT"
+      - type: command_passes
+        command: "python3 -c \"from zikkaron.retrieval import HippoRetriever; print('import ok')\""
+
+  - name: Add graph optimization tests and validate
+    prompt: |
+      Read zikkaron/tests/test_retrieval.py.
+
+      Add tests:
+
+      1. test_ppr_entity_min_length:
+         Verify that short entities (1-2 chars) are filtered out in ppr_retrieve.
+
+      2. test_spreading_uses_settings:
+         Verify spreading_activation uses settings for decay and depth.
+
+      Run all tests:
+        python3 -m pytest zikkaron/tests/ -x -q
+    validate:
+      - type: command_passes
+        command: "python3 -m pytest zikkaron/tests/ -x -q 2>&1 | tail -5"
+        timeout: 600

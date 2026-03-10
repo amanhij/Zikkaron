@@ -18,6 +18,16 @@ MODEL_DIMENSIONS = {
     "nomic-ai/nomic-embed-text-v1.5": 768,
 }
 
+# Models that require asymmetric query/document prefixes
+MODEL_QUERY_PREFIX = {
+    "nomic-ai/nomic-embed-text-v1.5": "search_query: ",
+    "BAAI/bge-small-en-v1.5": "Represent this sentence for searching relevant passages: ",
+    "BAAI/bge-base-en-v1.5": "Represent this sentence for searching relevant passages: ",
+}
+MODEL_DOC_PREFIX = {
+    "nomic-ai/nomic-embed-text-v1.5": "search_document: ",
+}
+
 # Backward-compatible alias
 _MODEL_DIMENSIONS = MODEL_DIMENSIONS
 
@@ -29,6 +39,7 @@ class EmbeddingEngine:
         self.model_name = model_name
         self._model = None
         self._unavailable = False
+        self._query_cache: dict[str, bytes] = {}
 
     def _ensure_model(self) -> None:
         """Load the SentenceTransformer model if not already loaded."""
@@ -37,7 +48,7 @@ class EmbeddingEngine:
         try:
             from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(self.model_name)
+            self._model = SentenceTransformer(self.model_name, trust_remote_code=True)
         except ImportError:
             logger.warning(
                 "sentence-transformers is not installed; "
@@ -81,9 +92,7 @@ class EmbeddingEngine:
         native_dim = len(arr)
         if dimensions is not None and dimensions < native_dim:
             arr = arr[:dimensions]
-            norm = np.linalg.norm(arr)
-            if norm > 0:
-                arr = arr / norm
+        arr = self._normalize(arr)
         return arr.tobytes()
 
     def batch_reembed(self, texts: list[str]) -> list[Optional[bytes]]:
@@ -111,13 +120,42 @@ class EmbeddingEngine:
             return arr.astype(np.float32).tobytes()
         raise ValueError(f"Unsupported dequantization bits: {bits}")
 
+    def encode_query(self, text: str) -> Optional[bytes]:
+        """Encode a query with model-specific query prefix for asymmetric retrieval."""
+        prefix = MODEL_QUERY_PREFIX.get(self.model_name, "")
+        return self.encode(prefix + text if prefix else text)
+
+    def encode_document(self, text: str) -> Optional[bytes]:
+        """Encode a document with model-specific document prefix for asymmetric retrieval."""
+        prefix = MODEL_DOC_PREFIX.get(self.model_name, "")
+        return self.encode(prefix + text if prefix else text)
+
+    def encode_document_enriched(self, content: str, enriched_content: str | None = None) -> bytes:
+        """Encode document, using enriched content if available for better implicit representation."""
+        text = enriched_content if enriched_content else content
+        return self.encode_document(text)
+
+    def _normalize(self, arr: np.ndarray) -> np.ndarray:
+        """L2-normalize an embedding vector. Required for L2-distance based search."""
+        norm = np.linalg.norm(arr)
+        if norm > 0:
+            arr = arr / norm
+        return arr
+
     def encode(self, text: str) -> Optional[bytes]:
         """Encode text to a float32 byte blob for SQLite BLOB storage."""
+        if text in self._query_cache:
+            return self._query_cache[text]
         self._ensure_model()
         if self._unavailable:
             return None
         vec = self._model.encode(text)
-        return np.asarray(vec, dtype=np.float32).tobytes()
+        arr = self._normalize(np.asarray(vec, dtype=np.float32))
+        result = arr.tobytes()
+        if len(self._query_cache) > 128:
+            self._query_cache.clear()
+        self._query_cache[text] = result
+        return result
 
     def encode_batch(self, texts: list[str]) -> list[Optional[bytes]]:
         """Batch encode texts for efficiency during consolidation."""
@@ -125,7 +163,11 @@ class EmbeddingEngine:
         if self._unavailable:
             return [None] * len(texts)
         vecs = self._model.encode(texts)
-        return [np.asarray(v, dtype=np.float32).tobytes() for v in vecs]
+        results = []
+        for v in vecs:
+            arr = self._normalize(np.asarray(v, dtype=np.float32))
+            results.append(arr.tobytes())
+        return results
 
     def similarity(self, embedding_a: bytes, embedding_b: bytes) -> float:
         """Compute cosine similarity between two embedding blobs."""

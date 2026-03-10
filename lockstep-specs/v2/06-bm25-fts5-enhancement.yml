@@ -1,0 +1,89 @@
+# 06-bm25-fts5-enhancement.yml — BM25/FTS5 Enhancement
+version: "1"
+config:
+  agent: claude-code
+  max_retries: 3
+  step_timeout: 600
+  working_directory: "/home/cryptalis/Zikkaron"
+context: |
+  We are enhancing Zikkaron's BM25/FTS5 lexical retrieval signal.
+
+  ## Problem
+  The current FTS5 implementation has basic query preprocessing:
+  - Stop word removal using a hardcoded frozenset
+  - OR-joining of remaining terms
+  - No stemming, no entity extraction, no query expansion
+  - No document enrichment at ingestion time
+
+  ## Solution
+  1. Enable FTS5 porter stemmer for better morphological matching
+  2. Improve query preprocessing with entity-aware tokenization
+  3. Add code identifier splitting (CamelCase → camel case)
+  4. Add document enrichment at ingestion (auto-tags, entity annotations)
+  5. Optimize stop word list for coding/conversation domain
+
+  ## Files to Modify
+  - zikkaron/storage.py — FTS5 query preprocessing improvements
+  - zikkaron/config.py — FTS5 settings (ALREADY ADDED)
+  - zikkaron/tests/test_storage.py — FTS5 tests
+
+steps:
+  - name: Enhance FTS5 query preprocessing
+    prompt: |
+      Read zikkaron/storage.py fully. Focus on the _preprocess_fts_query method
+      and the _FTS_STOP_WORDS set.
+
+      Improve the _preprocess_fts_query method with these changes:
+
+      1. **Identifier splitting**: Before stop word removal, split identifiers:
+         - CamelCase: "DatabaseConnection" → "Database Connection"
+         - snake_case: "auth_middleware" → "auth middleware"
+         - dotted: "os.path.join" → "os path join"
+         Use regex: re.sub(r'([a-z])([A-Z])', r'\1 \2', term) for CamelCase
+         Use term.replace('_', ' ').replace('.', ' ') for snake/dotted
+
+      2. **Preserve original entities**: If a term looks like an entity (starts with
+         uppercase, contains underscore, or contains dot), add a quoted phrase match
+         for the original term in addition to the split terms.
+         Example: "DatabaseConnection" → '"DatabaseConnection" OR Database OR Connection'
+
+      3. **Minimum term length**: Skip terms shorter than 2 characters after splitting.
+
+      4. **Expand stop words**: Add these coding-domain stop words to _FTS_STOP_WORDS:
+         "use", "using", "used", "like", "just", "get", "got", "set",
+         "make", "made", "let", "try", "need", "want", "know", "think",
+         "code", "file", "thing", "stuff"
+
+      Important: Do NOT change the method signature. Do NOT change the return type.
+      The method should still return a string suitable for FTS5 MATCH.
+      Add `import re` at the top if not already imported.
+    validate:
+      - type: file_contains
+        path: zikkaron/storage.py
+        pattern: "CamelCase"
+        is_regex: false
+      - type: command_passes
+        command: "python3 -c \"from zikkaron.storage import StorageEngine; print('import ok')\""
+
+  - name: Add FTS5 enhancement tests and validate
+    prompt: |
+      Read zikkaron/tests/test_storage.py to understand test patterns.
+
+      Add tests for FTS5 preprocessing:
+
+      1. test_fts_camelcase_splitting:
+         Verify "DatabaseConnection" gets split into multiple search terms
+         while preserving the original as a quoted phrase.
+
+      2. test_fts_snake_case_splitting:
+         Verify "auth_middleware" gets split into "auth" and "middleware".
+
+      3. test_fts_stop_words_expanded:
+         Verify new coding-domain stop words are removed.
+
+      Run all tests:
+        python3 -m pytest zikkaron/tests/ -x -q
+    validate:
+      - type: command_passes
+        command: "python3 -m pytest zikkaron/tests/ -x -q 2>&1 | tail -5"
+        timeout: 600

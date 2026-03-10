@@ -1,0 +1,157 @@
+# 01-wrrf-foundation.yml — WRRF (Weighted Reciprocal Rank Fusion)
+# Replaces static weighted-sum scoring with rank-based fusion.
+version: "1"
+config:
+  agent: claude-code
+  max_retries: 3
+  step_timeout: 600
+  working_directory: "/home/cryptalis/Zikkaron"
+context: |
+  We are replacing the static weighted-sum scoring in Zikkaron's recall() with
+  Weighted Reciprocal Rank Fusion (WRRF).
+
+  ## Problem
+  Current scoring: score = w1*signal1 + w2*signal2 + ... is magnitude-dependent
+  and doesn't normalize across signals with different score distributions.
+
+  ## Solution: WRRF
+  WRRF_score(d) = Σ_i [w_i / (k + rank_i(d))]
+  where k=60 (standard RRF constant) and w_i are per-signal weights.
+
+  ## Config settings already in config.py:
+  WRRF_K, WRRF_CANDIDATE_MULTIPLIER, WRRF_VECTOR_WEIGHT, WRRF_FTS_WEIGHT,
+  WRRF_PPR_WEIGHT, WRRF_SPREADING_WEIGHT, WRRF_HOPFIELD_WEIGHT,
+  WRRF_HDC_WEIGHT, WRRF_FRACTAL_WEIGHT, WRRF_SR_WEIGHT,
+  RERANKER_ENABLED, RERANKER_TOP_K
+
+  ## Files to Modify
+  - zikkaron/retrieval.py — Replace scoring with WRRF fusion + heuristic reranker
+
+steps:
+  - name: Add WRRF fusion method
+    prompt: |
+      Read zikkaron/retrieval.py fully. Understand the current recall() method
+      and how signals (vector, fts, ppr, spreading, hopfield, hdc, fractal, sr)
+      produce scores for memories.
+
+      Add a new method `_wrrf_fuse` to HippoRetriever:
+
+      ```python
+      def _wrrf_fuse(self, ranked_lists: dict[str, list[int]],
+                      wrrf_weights: dict[str, float],
+                      k: int | None = None) -> list[tuple[int, float]]:
+          """Weighted Reciprocal Rank Fusion across multiple ranked lists.
+
+          Args:
+              ranked_lists: signal_name -> list of memory IDs (sorted by signal score desc)
+              wrrf_weights: signal_name -> weight
+              k: RRF constant (default: self._settings.WRRF_K)
+
+          Returns:
+              List of (memory_id, wrrf_score) sorted by score descending.
+          """
+          if k is None:
+              k = self._settings.WRRF_K
+
+          scores: dict[int, float] = {}
+          for signal_name, mem_ids in ranked_lists.items():
+              w = wrrf_weights.get(signal_name, 0.0)
+              if w <= 0:
+                  continue
+              for rank, mem_id in enumerate(mem_ids):
+                  scores[mem_id] = scores.get(mem_id, 0.0) + w / (k + rank + 1)
+
+          return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+      ```
+
+      Do NOT modify recall() yet — just add the method.
+    validate:
+      - type: file_contains
+        path: zikkaron/retrieval.py
+        pattern: "_wrrf_fuse"
+      - type: file_contains
+        path: zikkaron/retrieval.py
+        pattern: "WRRF_K"
+      - type: command_passes
+        command: "python3 -c \"from zikkaron.retrieval import HippoRetriever; print('import ok')\""
+
+  - name: Add heuristic reranker
+    prompt: |
+      Read zikkaron/retrieval.py. Add a `_heuristic_rerank` method to HippoRetriever:
+
+      ```python
+      def _heuristic_rerank(self, memories: list[dict], query: str,
+                             top_k: int | None = None) -> list[dict]:
+          """Lightweight reranker using term overlap and exact match boosting.
+
+          Args:
+              memories: List of memory dicts with 'content' key
+              query: Original query string
+              top_k: Max results to return (default: self._settings.RERANKER_TOP_K)
+
+          Returns:
+              Reranked list of memory dicts with _rerank_score added.
+          """
+      ```
+
+      Implementation:
+      1. Tokenize query into lowercase terms (split on whitespace, strip punctuation).
+      2. For each memory, compute:
+         - term_coverage = |query_terms ∩ content_terms| / |query_terms|
+         - exact_match = 1.0 if query.lower() in content.lower() else 0.0
+         - _rerank_score = term_coverage * 0.7 + exact_match * 0.3
+      3. Combine: final_score = 0.7 * _retrieval_score + 0.3 * _rerank_score
+      4. Sort by final_score descending, return top_k.
+
+      Do NOT modify recall() yet.
+    validate:
+      - type: file_contains
+        path: zikkaron/retrieval.py
+        pattern: "_heuristic_rerank"
+      - type: command_passes
+        command: "python3 -c \"from zikkaron.retrieval import HippoRetriever; print('import ok')\""
+
+  - name: Refactor recall() to use WRRF fusion
+    prompt: |
+      Read zikkaron/retrieval.py fully. Focus on the recall() method.
+
+      Refactor recall() to use WRRF fusion instead of weighted sum:
+
+      1. After each signal computes its results, build a ranked_list for that signal.
+         A ranked list is just the memory IDs sorted by that signal's score descending.
+
+      2. Build wrrf_weights dict from settings:
+         ```python
+         wrrf_weights = {
+             "vector": self._settings.WRRF_VECTOR_WEIGHT,
+             "fts": self._settings.WRRF_FTS_WEIGHT,
+             "ppr": self._settings.WRRF_PPR_WEIGHT,
+             "spreading": self._settings.WRRF_SPREADING_WEIGHT,
+             "hopfield": self._settings.WRRF_HOPFIELD_WEIGHT,
+             "hdc": self._settings.WRRF_HDC_WEIGHT,
+             "fractal": self._settings.WRRF_FRACTAL_WEIGHT,
+             "sr": self._settings.WRRF_SR_WEIGHT,
+         }
+         ```
+
+      3. Replace the old scoring block (where scores are combined) with:
+         ```python
+         fused = self._wrrf_fuse(ranked_lists, wrrf_weights)
+         ```
+
+      4. After WRRF fusion, apply heuristic reranker if enabled:
+         ```python
+         if self._settings.RERANKER_ENABLED:
+             result_memories = self._heuristic_rerank(result_memories, query)
+         ```
+
+      Keep the existing signal computation code. Only change the SCORING/FUSION step.
+    validate:
+      - type: file_contains
+        path: zikkaron/retrieval.py
+        pattern: "wrrf_weights"
+      - type: file_contains
+        path: zikkaron/retrieval.py
+        pattern: "_wrrf_fuse"
+      - type: command_passes
+        command: "python3 -c \"from zikkaron.retrieval import HippoRetriever; print('import ok')\""

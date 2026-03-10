@@ -1,0 +1,94 @@
+# 09-embedding-enhancement.yml — Embedding Enhancement
+version: "1"
+config:
+  agent: claude-code
+  max_retries: 3
+  step_timeout: 600
+  working_directory: "/home/cryptalis/Zikkaron"
+context: |
+  We are enhancing the embedding/vector signal quality in Zikkaron.
+
+  ## Problem
+  1. Candidate pool is only 3x max_results — too small for 8-signal fusion
+  2. No contextual enrichment at query time
+  3. Query and document embeddings use the same encoding — no asymmetry
+  4. No embedding caching for repeated queries
+
+  ## Solution (conservative, no model changes)
+  1. Expand candidate pool from 3x to 10x max_results
+  2. Add query prefix for retrieval ("search_query: " prefix)
+  3. Cache query embeddings for repeated queries within a session
+  4. Add contextual document enrichment configuration
+
+  We do NOT change the embedding model in this spec.
+
+  ## Config settings already in config.py:
+  CANDIDATE_POOL_MULTIPLIER, EMBEDDING_CACHE_SIZE, QUERY_PREFIX
+
+  ## Files to Modify
+  - zikkaron/retrieval.py — Candidate pool expansion, query enrichment
+  - zikkaron/embeddings.py — Embedding caching
+
+steps:
+  - name: Expand candidate pool in recall
+    prompt: |
+      Read zikkaron/retrieval.py fully. Focus on the recall() method.
+
+      Find ALL instances of `max_results * 3` in the recall() method and replace
+      them with `candidate_k`.
+
+      At the top of recall(), after any weight computation, add:
+      ```python
+      candidate_k = max_results * self._settings.CANDIDATE_POOL_MULTIPLIER
+      ```
+
+      Also replace `max_results * 2` (used in ppr_retrieve call) with `candidate_k`.
+
+      This is a simple search-and-replace within the recall() method.
+      Do NOT change any other logic.
+    validate:
+      - type: file_contains
+        path: zikkaron/retrieval.py
+        pattern: "candidate_k"
+      - type: file_contains
+        path: zikkaron/retrieval.py
+        pattern: "CANDIDATE_POOL_MULTIPLIER"
+      - type: command_passes
+        command: "python3 -c \"from zikkaron.retrieval import HippoRetriever; print('import ok')\""
+
+  - name: Add embedding cache
+    prompt: |
+      Read zikkaron/embeddings.py fully.
+
+      Add an LRU cache for the encode() method:
+      1. Add a `_query_cache: dict` attribute in __init__
+      2. In encode(), check if the text is in _query_cache first
+      3. If cached, return the cached embedding
+      4. If not, compute, cache, and return
+      5. Limit cache size: if len(_query_cache) > 128, clear it
+
+      The cache should be instance-level, not global.
+      This is a performance optimization only. Do NOT change the encode() API.
+    validate:
+      - type: file_contains
+        path: zikkaron/embeddings.py
+        pattern: "_query_cache"
+      - type: command_passes
+        command: "python3 -c \"from zikkaron.embeddings import EmbeddingEngine; print('import ok')\""
+
+  - name: Add embedding tests and validate
+    prompt: |
+      Add tests for embedding enhancements:
+
+      1. test_candidate_pool_multiplier:
+         Verify that candidate_k uses CANDIDATE_POOL_MULTIPLIER setting.
+
+      2. test_embedding_cache_hit:
+         Encode the same string twice, verify cache is populated.
+
+      Run all tests:
+        python3 -m pytest zikkaron/tests/ -x -q
+    validate:
+      - type: command_passes
+        command: "python3 -m pytest zikkaron/tests/ -x -q 2>&1 | tail -5"
+        timeout: 600
