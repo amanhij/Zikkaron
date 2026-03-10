@@ -28,3 +28,10 @@ htmlcov/
 
 .env
 *.log
+
+# Research notes / benchmark artifacts
+research-prompt*.md
+benchmarks/*.md
+benchmarks/*.log
+benchmarks/eval_*.json
+benchmarks/ablation_runs/
