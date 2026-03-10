@@ -180,6 +180,46 @@ class TestRestore:
         assert "API key" in result["formatted"]
 
 
+class TestCLISubcommands:
+    """Test the drain/restore CLI subcommands."""
+
+    def test_cli_drain(self, temp_db):
+        import subprocess
+        result = subprocess.run(
+            ["python", "-m", "zikkaron", "drain", "/test/project", "--db-path", temp_db],
+            capture_output=True, text=True, timeout=120,
+        )
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+        assert data["status"] == "drained"
+        assert data["epoch"] == 1
+
+    def test_cli_restore(self, temp_db):
+        import subprocess
+        # First drain to create a checkpoint
+        subprocess.run(
+            ["python", "-m", "zikkaron", "drain", "/test/project", "--db-path", temp_db],
+            capture_output=True, text=True, timeout=120,
+        )
+        # Then restore
+        result = subprocess.run(
+            ["python", "-m", "zikkaron", "restore", "/test/project", "--db-path", temp_db],
+            capture_output=True, text=True, timeout=120,
+        )
+        assert result.returncode == 0
+        assert "Zikkaron Context Restoration" in result.stdout
+
+    def test_cli_restore_empty_db(self, temp_db):
+        import subprocess
+        result = subprocess.run(
+            ["python", "-m", "zikkaron", "restore", "/test/project", "--db-path", temp_db],
+            capture_output=True, text=True, timeout=120,
+        )
+        assert result.returncode == 0
+        # Should still output restoration header even with empty DB
+        assert "Zikkaron Context Restoration" in result.stdout
+
+
 class TestAutoCheckpoint:
     def test_tool_call_tracking(self, engines):
         storage, embeddings, replay = engines

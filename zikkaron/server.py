@@ -1058,11 +1058,10 @@ def sync_instructions(claude_md_path: str = "") -> dict:
 - Zikkaron is your brain. Use it.
 
 ### Hippocampal Replay — Context Compaction Shield
+- Hooks are installed automatically on startup — no manual setup needed
 - During long sessions, call `checkpoint` periodically to snapshot your working state
 - Use `anchor` to mark critical facts/decisions that MUST survive context compaction
 - After context compaction, call `restore` to reconstruct your working context
-- Run `install_hooks` once per project to enable automatic drain/restore on compaction
-- The hooks use PreCompact (drain before) and SessionStart:compact (restore after)
 - `checkpoint` fields: directory, current_task, files_being_edited, key_decisions, open_questions, next_steps, active_errors, custom_context
 - `anchor` fields: content, context, reason — creates protected memories with max heat
 - `restore` returns: checkpoint + anchored memories + hot context + SR predictions + gap detection
@@ -1311,6 +1310,13 @@ def main(
         logger.info("CLAUDE.md synced with Zikkaron v%s", __version__)
     except Exception:
         logger.debug("Auto-sync of CLAUDE.md failed (non-fatal)")
+
+    # Auto-install hooks for the current project if not already present
+    try:
+        install_hooks(cwd)
+        logger.info("Hippocampal Replay hooks installed for %s", cwd)
+    except Exception:
+        logger.debug("Auto-install of hooks failed (non-fatal)")
 
     if port is not None:
         mcp_server.settings.port = port

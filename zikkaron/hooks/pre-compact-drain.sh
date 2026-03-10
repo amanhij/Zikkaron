@@ -3,9 +3,6 @@
 # Drains context into Zikkaron before Claude Code compacts the conversation.
 # Reads hook input from stdin (JSON with session_id, cwd, trigger).
 
-ZIKKARON_PORT="${ZIKKARON_PORT:-8742}"
-ZIKKARON_URL="http://localhost:${ZIKKARON_PORT}"
-
 # Read hook input from stdin
 INPUT=$(cat)
 
@@ -15,10 +12,7 @@ if [ -z "$CWD" ]; then
     CWD=$(pwd)
 fi
 
-# Call Zikkaron's pre-compact endpoint
-curl -s -X POST "${ZIKKARON_URL}/hooks/pre-compact" \
-    -H "Content-Type: application/json" \
-    -d "{\"cwd\": \"${CWD}\"}" \
-    -m 5 > /dev/null 2>&1
+# Drain context directly via CLI (works in both stdio and SSE mode)
+zikkaron drain "$CWD" > /dev/null 2>&1
 
 exit 0
