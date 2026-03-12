@@ -33,7 +33,7 @@ Add to your Claude Code config:
 }
 ```
 
-Tell Claude how to use it. Drop this in your global `~/CLAUDE.md` (your home directory, not per-project):
+Tell Claude how to use it. Drop this in your global `~/.claude/CLAUDE.md` (your home directory, not per-project):
 
 ```markdown
 ## Memory
@@ -42,7 +42,7 @@ Tell Claude how to use it. Drop this in your global `~/CLAUDE.md` (your home dir
 - After completing significant work, call `remember` to store decisions and outcomes
 ```
 
-Or just let Zikkaron handle it. On every startup, it automatically syncs `~/CLAUDE.md` with the latest instructions via `sync_instructions`. You set it up once and never think about it again.
+Or just let Zikkaron handle it. On every startup, it automatically syncs `~/.claude/CLAUDE.md` with the latest instructions via `sync_instructions`. You set it up once and never think about it again.
 
 ## What this actually feels like
 
