@@ -1044,9 +1044,15 @@ def sync_instructions(claude_md_path: str = "") -> dict:
     and updates it with the latest tools, capabilities, and rules.
     Call this on session start or after Zikkaron updates.
 
-    claude_md_path: Path to CLAUDE.md. Defaults to ~/CLAUDE.md
+    claude_md_path: Path to CLAUDE.md. Defaults to ~/.claude/CLAUDE.md
     """
-    md_path = Path(claude_md_path) if claude_md_path else Path.home() / "CLAUDE.md"
+    md_path = Path(claude_md_path) if claude_md_path else Path.home() / ".claude" / "CLAUDE.md"
+
+    if not md_path.parent.is_dir():
+        return {
+            "status": "skipped",
+            "reason": f"Directory {md_path.parent} does not exist",
+        }
 
     # The canonical Zikkaron section
     zikkaron_section = f"""## Memory System — Zikkaron v{__version__}
