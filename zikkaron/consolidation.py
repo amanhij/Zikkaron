@@ -245,6 +245,14 @@ class AstrocyteEngine:
         except Exception:
             logger.exception("Compression cycle failed")
 
+        # Process action_log entries into real memories
+        try:
+            action_stats = self._process_action_log()
+            stats["actions_processed"] = action_stats.get("processed", 0)
+            stats["action_memories_created"] = action_stats.get("memories_created", 0)
+        except Exception:
+            logger.exception("Action log processing failed")
+
         duration_ms = int((time.monotonic() - start) * 1000)
         self._storage.insert_consolidation_log({
             **stats,
@@ -476,3 +484,93 @@ class AstrocyteEngine:
         for mid in to_delete:
             self._storage.delete_memory(mid)
             stats["memories_deleted"] += 1
+
+    # -- Action log processing --
+
+    def _process_action_log(self) -> dict:
+        """Process unprocessed action_log entries into summarized memories.
+
+        Groups actions by directory + 30-minute time windows, then creates
+        a summary memory for each group. This is the cold path — the hot
+        path (PostToolCall hook) just writes to action_log.
+        """
+        from datetime import datetime, timezone
+
+        stats = {"processed": 0, "memories_created": 0}
+
+        try:
+            rows = self._storage._conn.execute(
+                "SELECT id, tool_name, tool_input_summary, directory, timestamp "
+                "FROM action_log WHERE processed = 0 "
+                "ORDER BY timestamp ASC LIMIT 200"
+            ).fetchall()
+        except Exception:
+            return stats
+
+        if not rows:
+            return stats
+
+        # Group by directory + 30-min windows
+        groups: dict[str, list] = {}
+        for row in rows:
+            directory = row[3] or "unknown"
+            timestamp = row[4]
+            # Create a window key: directory + 30-min bucket
+            try:
+                dt = datetime.fromisoformat(timestamp)
+                bucket = dt.strftime("%Y-%m-%d-%H") + f"-{dt.minute // 30}"
+            except (ValueError, TypeError):
+                bucket = "unknown"
+            key = f"{directory}|{bucket}"
+            if key not in groups:
+                groups[key] = []
+            groups[key].append({
+                "id": row[0],
+                "tool": row[1],
+                "summary": row[2],
+                "directory": directory,
+            })
+
+        # Create a summary memory for each group with 3+ actions
+        for key, actions in groups.items():
+            directory = actions[0]["directory"]
+
+            # Build action summary
+            tool_counts: dict[str, int] = {}
+            details = []
+            for a in actions:
+                tool_counts[a["tool"]] = tool_counts.get(a["tool"], 0) + 1
+                if a["summary"] and len(details) < 5:
+                    details.append(f"{a['tool']}: {a['summary'][:80]}")
+
+            if len(actions) >= 3:
+                tools_str = ", ".join(f"{t}({c})" for t, c in sorted(tool_counts.items(), key=lambda x: -x[1]))
+                content = f"Session activity [{tools_str}]: {len(actions)} tool calls"
+                if details:
+                    content += "\n" + "\n".join(f"- {d}" for d in details)
+
+                # Store as a low-heat episodic memory (will be consolidated normally)
+                embedding = self._embeddings.encode(content)
+                self._storage.insert_memory({
+                    "content": content,
+                    "embedding": embedding,
+                    "tags": ["_action_stream", "_auto"],
+                    "directory_context": directory,
+                    "heat": 0.4,
+                    "is_stale": False,
+                    "file_hash": None,
+                    "embedding_model": self._embeddings.get_model_name(),
+                })
+                stats["memories_created"] += 1
+
+            # Mark all as processed
+            ids = [a["id"] for a in actions]
+            placeholders = ",".join("?" * len(ids))
+            self._storage._conn.execute(
+                f"UPDATE action_log SET processed = 1 WHERE id IN ({placeholders})",
+                ids,
+            )
+            stats["processed"] += len(actions)
+
+        self._storage._conn.commit()
+        return stats

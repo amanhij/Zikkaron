@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 
 from zikkaron.config import Settings
@@ -13,6 +14,14 @@ from zikkaron.metacognition import MetaCognition
 from zikkaron.fractal import FractalMemoryTree
 
 logger = logging.getLogger(__name__)
+
+# Patterns that trigger micro-checkpoints
+_MICRO_ERROR_RE = re.compile(
+    r"\b(error|exception|traceback|failed|crash|bug)\b", re.IGNORECASE
+)
+_MICRO_DECISION_RE = re.compile(
+    r"\b(decided|chose|switched|migrated|will use|going with|opted)\b", re.IGNORECASE
+)
 
 
 class HippocampalReplay:
@@ -121,6 +130,53 @@ class HippocampalReplay:
         self._storage._conn.commit()
         return memory_id
 
+    def should_micro_checkpoint(self, content: str, tags: list[str], surprisal: float = 0.0) -> tuple[bool, str]:
+        """Check if content warrants a micro-checkpoint.
+
+        Triggers on significant state changes:
+          - Error/exception detected in content
+          - Decision made
+          - Very high surprise event (surprisal > 0.8)
+          - Protected/critical tags
+
+        Returns (should_checkpoint, reason).
+        """
+        if not self._settings.MICRO_CHECKPOINT_ENABLED:
+            return False, ""
+
+        # Cooldown: don't checkpoint too frequently
+        if self._tool_call_count < self._settings.MICRO_CHECKPOINT_COOLDOWN:
+            return False, ""
+
+        if _MICRO_ERROR_RE.search(content):
+            return True, "error_detected"
+
+        if _MICRO_DECISION_RE.search(content):
+            return True, "decision_made"
+
+        if surprisal > 0.8:
+            return True, "high_surprise_event"
+
+        tag_set = {t.lower() for t in tags}
+        if tag_set & {"critical", "important", "architecture", "breaking"}:
+            return True, "critical_tag"
+
+        return False, ""
+
+    def create_micro_checkpoint(self, directory: str, content: str, reason: str) -> dict | None:
+        """Create a lightweight checkpoint triggered by a significant event.
+
+        These are more frequent than manual checkpoints but capture less data.
+        They ensure that important state transitions aren't lost between
+        full checkpoints.
+        """
+        summary = content[:150].replace("\n", " ")
+        return self.create_checkpoint(
+            directory=directory,
+            current_task=f"[micro:{reason}] {summary}",
+            session_id="micro-auto",
+        )
+
     def pre_compact_drain(self, directory: str) -> dict:
         """Emergency context capture before compaction.
 
@@ -188,7 +244,32 @@ class HippocampalReplay:
             if isinstance(m.get("tags"), str):
                 m["tags"] = json.loads(m["tags"])
 
-        # 3. Hot project memories
+        # 3. Recently stored memories (working memory — what was actively being worked on)
+        # These capture incremental progress that may not be "hot" yet but represents
+        # the user's active train of thought before compaction
+        recent_memories = []
+        try:
+            recent_rows = self._storage._conn.execute(
+                """SELECT * FROM memories
+                   WHERE heat > 0 AND is_protected = 0
+                   AND tags NOT LIKE '%_anchor%'
+                   ORDER BY created_at DESC LIMIT ?""",
+                (max_memories,),
+            ).fetchall()
+            for r in recent_rows:
+                m = dict(r)
+                m.pop("embedding", None)
+                m.pop("hdc_vector", None)
+                if isinstance(m.get("tags"), str):
+                    try:
+                        m["tags"] = json.loads(m["tags"])
+                    except (ValueError, TypeError):
+                        pass
+                recent_memories.append(m)
+        except Exception:
+            logger.debug("Failed to fetch recently stored memories for restore")
+
+        # 4. Hot project memories
         hot_memories = []
         if directory:
             hot_memories = self._storage.get_memories_for_directory(
@@ -202,12 +283,13 @@ class HippocampalReplay:
             m.pop("embedding", None)
             m.pop("hdc_vector", None)
 
-        # Exclude anchored IDs from hot to avoid duplicates
+        # Exclude anchored and recent IDs from hot to avoid duplicates
         anchor_ids = {m["id"] for m in anchored}
-        hot_memories = [m for m in hot_memories if m["id"] not in anchor_ids]
+        recent_ids = {m["id"] for m in recent_memories}
+        hot_memories = [m for m in hot_memories if m["id"] not in anchor_ids | recent_ids]
         hot_memories = hot_memories[:max_memories]
 
-        # 4. Predictive retrieval via SR cognitive map
+        # 5. Predictive retrieval via SR cognitive map
         predicted = []
         if self._cognitive_map is not None and self._cognitive_map.has_sufficient_data():
             # Use checkpoint task as query for SR navigation
@@ -222,7 +304,7 @@ class HippocampalReplay:
                     sr_results = self._cognitive_map.navigate_to(
                         query_emb, self._embeddings, top_k=max_memories // 2
                     )
-                    seen_ids = anchor_ids | {m["id"] for m in hot_memories}
+                    seen_ids = anchor_ids | recent_ids | {m["id"] for m in hot_memories}
                     for mid, proximity in sr_results:
                         if mid not in seen_ids:
                             mem = self._storage.get_memory(mid)
@@ -233,7 +315,7 @@ class HippocampalReplay:
                                 predicted.append(mem)
                                 seen_ids.add(mid)
 
-        # 5. Gap detection
+        # 6. Gap detection
         gaps = []
         if self._metacognition is not None and directory:
             try:
@@ -243,12 +325,13 @@ class HippocampalReplay:
 
         # Build formatted markdown for hook injection
         markdown = self._format_restoration(
-            checkpoint, anchored, hot_memories, predicted, gaps, directory
+            checkpoint, anchored, recent_memories, hot_memories, predicted, gaps, directory
         )
 
         return {
             "checkpoint": checkpoint,
             "anchored_memories": len(anchored),
+            "recent_memories": len(recent_memories),
             "hot_memories": len(hot_memories),
             "predicted_memories": len(predicted),
             "gaps_detected": len(gaps),
@@ -260,6 +343,7 @@ class HippocampalReplay:
         self,
         checkpoint: dict | None,
         anchored: list[dict],
+        recent: list[dict],
         hot: list[dict],
         predicted: list[dict],
         gaps: list[dict],
@@ -321,10 +405,19 @@ class HippocampalReplay:
         if anchored:
             lines.append("## Critical Facts (Anchored)")
             for m in anchored:
-                prefix = m.get("contextual_prefix", "")
                 content = m.get("content", "")
-                # Strip the [ANCHOR: reason] prefix for cleaner display
                 lines.append(f"- {content}")
+            lines.append("")
+
+        # Recently stored (working memory)
+        if recent:
+            lines.append("## Working Memory (Recently Stored)")
+            for m in recent[:6]:
+                content = m.get("content", "")
+                if len(content) > 250:
+                    content = content[:250] + "..."
+                created = m.get("created_at", "")[:16]
+                lines.append(f"- [{created}] {content}")
             lines.append("")
 
         # Hot memories
@@ -332,7 +425,6 @@ class HippocampalReplay:
             lines.append("## Active Project Context")
             for m in hot[:6]:
                 content = m.get("content", "")
-                # Truncate long memories for restoration
                 if len(content) > 200:
                     content = content[:200] + "..."
                 heat = m.get("heat", 0)

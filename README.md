@@ -4,7 +4,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/zikkaron)](https://pypi.org/project/zikkaron/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-718%20passed-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-969%20passed-brightgreen)](#testing)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 
 *Zikkaron (זיכרון) is Hebrew for "memory."*
@@ -96,6 +96,26 @@ Tool: install_hooks
 
 After that, everything is automatic. You don't think about it. You don't call anything manually. The hooks fire, the context drains, the context restores. Your long sessions just... work.
 
+## Zero-gap memory (v1.3.0)
+
+Previous versions still had gaps. You'd work on something for an hour, making incremental progress, and Zikkaron's write gate would block half of it because each small step looked "unsurprising" relative to the last. You'd make a critical architecture decision and it would slowly decay into a gist. You'd come back to a new session and Claude would have no idea what you were just doing.
+
+v1.3.0 fixes all of this:
+
+**Adaptive write gate.** The system now tracks your last 10 stored memories. When you're clearly working on the same task — same directory, same timeframe, similar content — it lowers the surprisal threshold so incremental progress gets through. The gate still blocks noise. It just stops blocking your work.
+
+**Decision auto-protection.** When you say "decided to use Redis instead of Memcached" or "chose the event-sourcing pattern over CRUD," Zikkaron detects the decision pattern and automatically marks it as protected. Protected memories never compress and never decay fast. Your decisions outlive your sessions.
+
+**Automatic action capture.** A `PostToolUse` hook fires after every single tool call Claude makes. File edits, bash commands, searches — all captured into a lightweight action log. The consolidation daemon periodically processes these into real memories. You don't call `remember` for routine work. The system just knows.
+
+**Session context injection.** A `SessionStart` hook fires on every new session and injects your project context — hot memories, anchored facts, recent actions, last checkpoint — directly into Claude's context window. Claude starts every session already knowing what you were doing.
+
+**Micro-checkpointing.** Instead of checkpointing every 50 tool calls, the system now auto-checkpoints on significant events: errors encountered, decisions made, high-surprise information. Critical state transitions are captured the moment they happen.
+
+**Session coherence.** Memories created within the last 4 hours get a heat bonus that fades linearly. You'll never hit the "I just told you this 10 minutes ago" problem again.
+
+All hooks work in both stdio and HTTP transport modes — they access the SQLite database directly, no server communication needed.
+
 ## The science under the hood
 
 Zikkaron doesn't store memories the way a database stores rows. It treats them more like a brain treats experiences.
@@ -137,7 +157,7 @@ Zikkaron doesn't store memories the way a database stores rows. It treats them m
 | `checkpoint` | Snapshot working state for compaction recovery |
 | `restore` | Reconstruct context after compaction via Hippocampal Replay |
 | `anchor` | Mark critical facts as compaction-resistant |
-| `install_hooks` | Enable automatic drain/restore on context compaction |
+| `install_hooks` | Enable auto-capture, context injection, and compaction recovery hooks |
 | `sync_instructions` | Update CLAUDE.md with latest Zikkaron capabilities |
 
 ## Architecture
@@ -151,7 +171,7 @@ Everything runs locally. A single SQLite database with WAL mode, FTS5 full-text 
 
 | Module | Role |
 |--------|------|
-| `storage.py` | SQLite WAL engine, 15 tables, FTS5 indexing, `sqlite-vec` ANN search |
+| `storage.py` | SQLite WAL engine, 16 tables, FTS5 indexing, `sqlite-vec` ANN search |
 | `embeddings.py` | Sentence-transformer encoding (`all-MiniLM-L6-v2`), batched operations |
 | `retrieval.py` | Four-signal fusion: vector similarity, FTS5 BM25, knowledge graph PPR, spreading activation |
 | `models.py` | Pydantic data models for the full type hierarchy |
@@ -272,7 +292,7 @@ Full list in `zikkaron/config.py`.
 python -m pytest zikkaron/tests/ -x -q
 ```
 
-718 tests across 34 test files covering every subsystem.
+969 tests across 34 test files covering every subsystem.
 
 ## References
 

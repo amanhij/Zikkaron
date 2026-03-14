@@ -459,6 +459,20 @@ class StorageEngine:
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_checkpoints_active ON checkpoints(is_active, created_at DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_checkpoints_epoch ON checkpoints(epoch)")
+
+        # Action log — lightweight event capture from PostToolCall hooks
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS action_log(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tool_name TEXT NOT NULL,
+                tool_input_summary TEXT DEFAULT '',
+                directory TEXT DEFAULT '',
+                session_id TEXT DEFAULT '',
+                timestamp TEXT NOT NULL,
+                processed INTEGER DEFAULT 0
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_action_log_processed ON action_log(processed, timestamp)")
         c.commit()
 
     # -- helpers --

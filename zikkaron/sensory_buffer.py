@@ -1,4 +1,5 @@
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 
 from zikkaron.config import Settings
@@ -13,6 +14,8 @@ class SensoryBuffer:
         self._overlap_chars = settings.OVERLAP_TOKENS * 4
         self.session_id: str | None = None
         self.current_episode: dict | None = None
+        # Action stream: lightweight log of all tool invocations for pattern extraction
+        self._action_stream: deque[dict] = deque(maxlen=200)
 
     def start_session(self) -> str:
         self.session_id = uuid.uuid4().hex
@@ -53,6 +56,45 @@ class SensoryBuffer:
 
     def get_session_episodes(self, session_id: str) -> list[dict]:
         return self._storage.get_session_episodes(session_id)
+
+    def capture_action(self, tool: str, directory: str, summary: str, result_type: str) -> None:
+        """Record a tool invocation in the action stream.
+
+        Action stream entries are lightweight structured records that capture
+        what happened during the session. They feed into the sensory buffer
+        as formatted text and can be used by consolidation to extract patterns
+        like 'user tends to recall X before editing Y'.
+        """
+        if not self._settings.ACTION_STREAM_ENABLED:
+            return
+
+        action = {
+            "tool": tool,
+            "directory": directory,
+            "summary": summary[:200],
+            "result_type": result_type,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        self._action_stream.append(action)
+
+        # Also inject into the sensory buffer as structured text
+        action_text = f"[ACTION:{tool}] {result_type}: {summary[:150]}"
+        self.capture(action_text, directory)
+
+    def get_recent_actions(self, n: int = 20) -> list[dict]:
+        """Return the last N action stream entries."""
+        return list(self._action_stream)[-n:]
+
+    def get_action_summary(self) -> str:
+        """Generate a summary of recent actions for checkpoint context."""
+        if not self._action_stream:
+            return ""
+
+        recent = list(self._action_stream)[-10:]
+        lines = []
+        for a in recent:
+            lines.append(f"- {a['tool']}: {a['summary'][:80]}")
+        return "Recent actions:\n" + "\n".join(lines)
 
     def _rotate_episode(self) -> None:
         old_content = self.current_episode["raw_content"]

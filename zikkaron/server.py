@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import time
@@ -45,6 +46,14 @@ from zikkaron.restoration import HippocampalReplay
 from zikkaron.thermodynamics import MemoryThermodynamics
 
 logger = logging.getLogger(__name__)
+
+# Strong decision patterns for auto-protection
+_DECISION_STRONG_RE = re.compile(
+    r"\b(chose .+ over|decided to use|switched from .+ to|migrated from|"
+    r"will use .+ instead|going with|opted for|selected .+ because|"
+    r"choosing .+ approach|picking .+ strategy)\b",
+    re.IGNORECASE,
+)
 
 # Global instances — initialized in main()
 _storage: StorageEngine | None = None
@@ -148,6 +157,44 @@ async def hook_post_compact(request: Request) -> JSONResponse:
 
     result = replay.restore(directory)
     return JSONResponse(result)
+
+
+@mcp_server.custom_route("/hooks/auto-capture", methods=["POST"])
+async def hook_auto_capture(request: Request) -> JSONResponse:
+    """Capture a tool action from PostToolUse hook (HTTP transport).
+
+    Accepts JSON: {tool_name, summary, directory, session_id}
+    Writes directly to action_log table — no write gate, no embeddings.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"status": "error", "message": "Invalid JSON"}, status_code=400)
+
+    storage = _storage
+    if storage is None:
+        return JSONResponse({"status": "error", "message": "Storage not initialized"}, status_code=503)
+
+    from datetime import datetime, timezone
+    tool_name = body.get("tool_name", "unknown")
+
+    # Skip Zikkaron's own tools
+    if tool_name.startswith("mcp__zikkaron__"):
+        return JSONResponse({"status": "skipped", "reason": "zikkaron_tool"})
+
+    storage._conn.execute(
+        "INSERT INTO action_log (tool_name, tool_input_summary, directory, session_id, timestamp) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (
+            tool_name,
+            body.get("summary", "")[:200],
+            body.get("directory", ""),
+            body.get("session_id", ""),
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    storage._conn.commit()
+    return JSONResponse({"status": "captured"})
 
 
 def _get_storage() -> StorageEngine:
@@ -411,6 +458,80 @@ def remember(content: str, context: str, tags: list[str]) -> dict:
         except Exception:
             logger.debug("HDC encoding failed for memory %s", memory_id)
 
+    # ── Zero-Gap Enhancements ────────────────────────────────────────────
+
+    # 1. Record store in write gate for task continuity tracking
+    if _write_gate is not None:
+        _write_gate.record_stored(content, context, embedding)
+
+    # 2. Decision auto-protection: detect decisions and shield from decay
+    auto_protected = False
+    if settings.DECISION_AUTO_PROTECT and _DECISION_STRONG_RE.search(content):
+        storage._conn.execute(
+            "UPDATE memories SET is_protected = 1, importance = 1.0 WHERE id = ?",
+            (memory_id,),
+        )
+        storage._conn.commit()
+        auto_protected = True
+        logger.debug("Decision auto-protected: memory %s", memory_id)
+
+    # 3. Session coherence: boost heat for current-session memories
+    if thermo is not None:
+        mem_data = storage.get_memory(memory_id)
+        if mem_data and mem_data.get("created_at"):
+            coherent_heat = thermo.apply_session_coherence(
+                mem_data["heat"], mem_data["created_at"]
+            )
+            if coherent_heat != mem_data["heat"]:
+                storage.update_memory_heat(memory_id, coherent_heat)
+
+    # 4. Micro-checkpoint: auto-checkpoint on significant events
+    if _replay is not None and settings.MICRO_CHECKPOINT_ENABLED:
+        gate_surprisal = gate_result["surprisal"] if gate_result else 0.0
+        should_micro, micro_reason = _replay.should_micro_checkpoint(
+            content, tags, gate_surprisal
+        )
+        if should_micro:
+            try:
+                _replay.create_micro_checkpoint(context, content, micro_reason)
+                logger.debug("Micro-checkpoint created: %s", micro_reason)
+            except Exception:
+                logger.debug("Micro-checkpoint failed")
+
+    # 5. Action stream: log this remember operation
+    if buffer is not None:
+        summary = content[:150].replace("\n", " ")
+        buffer.capture_action("remember", context, summary, curation_action)
+
+    # 6. Related context reinjection: surface what you already know
+    related_context = []
+    if settings.REINJECTION_ENABLED and _retriever is not None:
+        try:
+            related = _retriever.recall(
+                content[:300], max_results=settings.REINJECTION_MAX_RESULTS + 1,
+                min_heat=0.3,
+            )
+            for r in related:
+                if r["id"] != memory_id:
+                    r_content = r.get("content", "")
+                    if len(r_content) > 300:
+                        r_content = r_content[:300] + "..."
+                    related_context.append({
+                        "id": r["id"],
+                        "content": r_content,
+                        "heat": r.get("heat", 0),
+                    })
+                if len(related_context) >= settings.REINJECTION_MAX_RESULTS:
+                    break
+        except Exception:
+            logger.debug("Reinjection recall failed")
+
+    # Track tool call for auto-checkpoint interval
+    if _replay is not None:
+        _replay.record_tool_call()
+
+    # ── Build Response ─────────────────────────────────────────────────
+
     memory = storage.get_memory(memory_id)
     # Strip binary fields from response (not JSON-serializable)
     memory.pop("embedding", None)
@@ -428,6 +549,11 @@ def remember(content: str, context: str, tags: list[str]) -> dict:
         memory["engram_slot"] = engram_result["slot_index"]
         memory["temporal_links"] = engram_result["temporally_linked"]
         memory["temporal_link_count"] = engram_result["link_count"]
+    if auto_protected:
+        memory["auto_protected"] = True
+        memory["protection_reason"] = "decision_detected"
+    if related_context:
+        memory["related_context"] = related_context
     return memory
 
 
@@ -517,6 +643,16 @@ def recall(query: str, max_results: int = 5, min_heat: float = 0.1) -> list[dict
                 _reconsolidation.reconsolidate(m["id"], query, "")
             except Exception:
                 logger.debug("Reconsolidation failed for memory %s", m.get("id"))
+
+    # Action stream: log this recall operation
+    buffer = _buffer
+    if buffer is not None:
+        result_count = len(merged)
+        buffer.capture_action("recall", "", f"query='{query[:80]}' results={result_count}", f"found_{result_count}")
+
+    # Track tool call for auto-checkpoint interval
+    if _replay is not None:
+        _replay.record_tool_call()
 
     # Strip binary fields from response (not JSON-serializable)
     for m in merged:
@@ -901,6 +1037,15 @@ def checkpoint(
     Checkpoints auto-supersede — only the latest one matters.
     """
     replay = _get_replay()
+
+    # Enrich checkpoint with action stream summary if available
+    enriched_context = custom_context
+    buffer = _buffer
+    if buffer is not None:
+        action_summary = buffer.get_action_summary()
+        if action_summary:
+            enriched_context = f"{custom_context}\n\n{action_summary}" if custom_context else action_summary
+
     return replay.create_checkpoint(
         directory=directory,
         current_task=current_task,
@@ -909,7 +1054,7 @@ def checkpoint(
         open_questions=open_questions,
         next_steps=next_steps,
         active_errors=active_errors,
-        custom_context=custom_context,
+        custom_context=enriched_context,
     )
 
 
@@ -955,10 +1100,16 @@ def anchor(content: str, context: str, reason: str = "") -> dict:
 
 @mcp_server.tool()
 def install_hooks(project_directory: str = "") -> dict:
-    """Install Claude Code hooks for automatic Hippocampal Replay.
+    """Install Claude Code hooks for automatic memory capture and replay.
 
-    Creates PreCompact and SessionStart hooks in the project's .claude/ directory.
-    After installation, context drain/restore happens automatically on every compaction.
+    Installs four hook types:
+      - PreCompact: drain context before compaction
+      - SessionStart (compact): restore context after compaction
+      - SessionStart (all): inject project context on every new session
+      - PostToolUse: capture every tool action into action_log
+
+    Works in both stdio and HTTP transport modes — all hooks use
+    direct SQLite access (no server communication needed).
 
     project_directory: The project root. Defaults to cwd.
     """
@@ -972,15 +1123,24 @@ def install_hooks(project_directory: str = "") -> dict:
     # Copy hook scripts from package
     package_hooks = Path(__file__).parent / "hooks"
 
-    pre_compact_src = package_hooks / "pre-compact-drain.sh"
-    post_compact_src = package_hooks / "post-compact-rehydrate.sh"
+    hook_files = {
+        "pre-compact-drain.sh": 0o755,
+        "post-compact-rehydrate.sh": 0o755,
+        "post-tool-capture.py": 0o755,
+        "session-start-context.py": 0o755,
+    }
+
+    for filename, mode in hook_files.items():
+        src = package_hooks / filename
+        dst = hooks_dir / filename
+        if src.exists():
+            shutil.copy2(src, dst)
+            dst.chmod(mode)
+
     pre_compact_dst = hooks_dir / "pre-compact-drain.sh"
     post_compact_dst = hooks_dir / "post-compact-rehydrate.sh"
-
-    shutil.copy2(pre_compact_src, pre_compact_dst)
-    shutil.copy2(post_compact_src, post_compact_dst)
-    pre_compact_dst.chmod(0o755)
-    post_compact_dst.chmod(0o755)
+    post_tool_dst = hooks_dir / "post-tool-capture.py"
+    session_ctx_dst = hooks_dir / "session-start-context.py"
 
     # Write hooks configuration
     settings_path = claude_dir / "settings.json"
@@ -1006,22 +1166,45 @@ def install_hooks(project_directory: str = "") -> dict:
         }
     ]
 
-    # SessionStart hook — restore context after compaction
-    hooks_config["SessionStart"] = hooks_config.get("SessionStart", [])
-    # Check if we already have a compact matcher
-    has_compact = any(
-        h.get("matcher") == "compact" for h in hooks_config["SessionStart"]
-    )
-    if not has_compact:
-        hooks_config["SessionStart"].append({
-            "matcher": "compact",
+    # SessionStart hooks — context on every session + full restore on compact
+    session_hooks = []
+
+    # All sessions: inject lightweight context
+    session_hooks.append({
+        "matcher": "",
+        "hooks": [
+            {
+                "type": "command",
+                "command": f"python3 {session_ctx_dst}",
+            }
+        ],
+    })
+
+    # After compaction: full restore with working memory, anchored, SR predictions
+    session_hooks.append({
+        "matcher": "compact",
+        "hooks": [
+            {
+                "type": "command",
+                "command": str(post_compact_dst),
+            }
+        ],
+    })
+
+    hooks_config["SessionStart"] = session_hooks
+
+    # PostToolUse hook — capture every tool action into action_log
+    hooks_config["PostToolUse"] = [
+        {
+            "matcher": "",
             "hooks": [
                 {
                     "type": "command",
-                    "command": str(post_compact_dst),
+                    "command": f"python3 {post_tool_dst}",
                 }
             ],
-        })
+        }
+    ]
 
     settings_data["hooks"] = hooks_config
     settings_path.write_text(json.dumps(settings_data, indent=2))
@@ -1030,8 +1213,12 @@ def install_hooks(project_directory: str = "") -> dict:
         "status": "installed",
         "project_directory": str(project_dir),
         "hooks_directory": str(hooks_dir),
-        "pre_compact_hook": str(pre_compact_dst),
-        "post_compact_hook": str(post_compact_dst),
+        "hooks_installed": [
+            "PreCompact (drain)",
+            "SessionStart (context)",
+            "SessionStart (compact restore)",
+            "PostToolUse (auto-capture)",
+        ],
         "settings_file": str(settings_path),
     }
 
@@ -1086,7 +1273,14 @@ def sync_instructions(claude_md_path: str = "") -> dict:
 - `recall_hierarchical(query, level)` — Fractal hierarchy query
 - `navigate_memory(query)` — SR cognitive map navigation
 - `assess_coverage(query, directory)` — Knowledge coverage check
-- `detect_gaps(directory)` — Find knowledge gaps"""
+- `detect_gaps(directory)` — Find knowledge gaps
+
+### Auto-Capture Hooks (v1.3.0)
+- PostToolUse hook captures EVERY tool action automatically — no manual remember needed
+- SessionStart hook injects project context on EVERY new session
+- All hooks work in both stdio and HTTP transport modes (direct SQLite access)
+- Action log is processed into real memories during consolidation cycles
+- Decisions are auto-protected from decay/compression when detected"""
 
     if md_path.exists():
         content = md_path.read_text()

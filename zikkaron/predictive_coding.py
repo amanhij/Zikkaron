@@ -14,7 +14,7 @@ References:
 
 import logging
 import re
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime, timezone
 
 import numpy as np
@@ -60,6 +60,76 @@ class PredictiveCodingGate:
         self._retriever = retriever
         self._settings = settings
         self._threshold = settings.WRITE_GATE_THRESHOLD
+        # Task continuity tracking — recent stores form a "working context"
+        self._recent_stores: deque[dict] = deque(
+            maxlen=settings.WRITE_GATE_CONTINUITY_WINDOW
+        )
+
+    # ── Task Continuity ──────────────────────────────────────────────────
+
+    def record_stored(self, content: str, directory: str, embedding) -> None:
+        """Record a successfully stored memory for task continuity tracking.
+
+        Called after a memory passes the gate and is stored. Builds up the
+        'working context' that reduces the threshold for follow-up memories
+        about the same task.
+        """
+        self._recent_stores.append({
+            "directory": directory,
+            "embedding": embedding,
+            "timestamp": datetime.now(timezone.utc),
+        })
+
+    def _compute_task_continuity(self, content: str, directory: str) -> float:
+        """How task-continuous is this content with recent stores?
+
+        Returns 0.0 (no continuity) to 1.0 (strong continuity).
+        High continuity = should lower the write gate threshold because
+        the user is actively working on this task and incremental progress
+        matters even if it's not 'surprising'.
+
+        Three signals:
+          - Directory match: same project = likely same task
+          - Temporal proximity: recent stores = active task
+          - Semantic similarity: working on same concept
+        """
+        if not self._recent_stores:
+            return 0.0
+
+        n = len(self._recent_stores)
+
+        # Signal 1: Directory match
+        dir_matches = sum(1 for s in self._recent_stores if s["directory"] == directory)
+        dir_continuity = dir_matches / n
+
+        # Signal 2: Temporal proximity (within last hour)
+        now = datetime.now(timezone.utc)
+        recent_count = sum(
+            1 for s in self._recent_stores
+            if (now - s["timestamp"]).total_seconds() < 3600
+        )
+        temporal_continuity = recent_count / n
+
+        # Signal 3: Semantic similarity to recent stores
+        semantic_continuity = 0.0
+        embedding = self._embeddings.encode(content)
+        if embedding is not None:
+            sims = []
+            for s in self._recent_stores:
+                if s.get("embedding") is not None:
+                    sim = self._embeddings.similarity(embedding, s["embedding"])
+                    sims.append(sim)
+            if sims:
+                semantic_continuity = max(sims)
+
+        # Weighted combination
+        continuity = (
+            0.3 * dir_continuity
+            + 0.3 * temporal_continuity
+            + 0.4 * semantic_continuity
+        )
+
+        return min(1.0, continuity)
 
     # ── Core: Surprisal Computation ──────────────────────────────────────
 
@@ -308,18 +378,31 @@ class PredictiveCodingGate:
         # Compute surprisal for gating decision
         surprisal = self.compute_surprisal(content, directory, tags)
 
-        if surprisal >= self._threshold:
+        # Adaptive threshold: lower it when working on the same task
+        # This prevents the gate from blocking incremental progress
+        continuity = self._compute_task_continuity(content, directory)
+        discount = continuity * self._settings.WRITE_GATE_CONTINUITY_DISCOUNT
+        effective_threshold = max(0.1, self._threshold - discount)
+
+        if surprisal >= effective_threshold:
             logger.debug(
-                "Write gate PASS: surprisal=%.3f >= threshold=%.3f dir=%s",
-                surprisal, self._threshold, directory,
+                "Write gate PASS: surprisal=%.3f >= effective_threshold=%.3f "
+                "(base=%.3f, continuity=%.2f, discount=%.3f) dir=%s",
+                surprisal, effective_threshold, self._threshold,
+                continuity, discount, directory,
             )
-            return (True, surprisal, "high_surprisal")
+            reason = "high_surprisal"
+            if discount > 0:
+                reason = f"task_continuous (threshold={effective_threshold:.2f})"
+            return (True, surprisal, reason)
         else:
             logger.debug(
-                "Write gate BLOCK: surprisal=%.3f < threshold=%.3f dir=%s",
-                surprisal, self._threshold, directory,
+                "Write gate BLOCK: surprisal=%.3f < effective_threshold=%.3f "
+                "(base=%.3f, continuity=%.2f) dir=%s",
+                surprisal, effective_threshold, self._threshold,
+                continuity, directory,
             )
-            return (False, surprisal, "below_threshold")
+            return (False, surprisal, f"below_threshold (effective={effective_threshold:.2f})")
 
     # ── Event Boundary Detection ─────────────────────────────────────────
 

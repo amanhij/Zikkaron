@@ -57,6 +57,18 @@ class Settings(BaseSettings):
     REPLAY_ANCHOR_HEAT: float = 1.0  # Heat assigned to anchored memories
     REPLAY_CHECKPOINT_AUTO_INTERVAL: int = 50  # Auto-checkpoint every N tool calls
 
+    # v5: Zero-gap memory persistence settings
+    WRITE_GATE_CONTINUITY_DISCOUNT: float = 0.15  # Threshold reduction for task-continuous content
+    WRITE_GATE_CONTINUITY_WINDOW: int = 10  # Number of recent stores to track for continuity
+    MICRO_CHECKPOINT_ENABLED: bool = True  # Auto-checkpoint on significant events
+    MICRO_CHECKPOINT_COOLDOWN: int = 5  # Min tool calls between micro-checkpoints
+    SESSION_COHERENCE_BONUS: float = 0.2  # Heat bonus for current-session memories
+    SESSION_COHERENCE_WINDOW_HOURS: float = 4.0  # How long the session coherence lasts
+    REINJECTION_ENABLED: bool = True  # Auto-surface related context on remember
+    REINJECTION_MAX_RESULTS: int = 3  # Max related memories to reinject
+    DECISION_AUTO_PROTECT: bool = True  # Auto-protect detected decisions from decay
+    ACTION_STREAM_ENABLED: bool = True  # Capture tool actions in sensory buffer
+
     # v6: WRRF (Weighted Reciprocal Rank Fusion) settings
     WRRF_K: int = 60  # RRF constant k
     WRRF_CANDIDATE_MULTIPLIER: int = 10  # Candidate pool = max_results * this

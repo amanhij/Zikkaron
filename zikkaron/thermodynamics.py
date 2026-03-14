@@ -2,6 +2,7 @@
 
 import logging
 import re
+from datetime import datetime, timezone
 
 from zikkaron.config import Settings
 from zikkaron.embeddings import EmbeddingEngine
@@ -234,3 +235,33 @@ class MemoryThermodynamics:
             return 1.0
 
         return mem.get("confidence", 1.0)
+
+    # -- g. Session Coherence --
+
+    def apply_session_coherence(self, heat: float, created_at: str) -> float:
+        """Boost heat for memories created within the current session window.
+
+        Memories created recently (within SESSION_COHERENCE_WINDOW_HOURS) get
+        a heat bonus that decreases linearly as they age. This prevents the
+        'I just told you this 10 minutes ago' problem by keeping active session
+        context elevated.
+
+        Returns boosted heat (capped at 1.0).
+        """
+        try:
+            mem_dt = datetime.fromisoformat(created_at)
+            if mem_dt.tzinfo is None:
+                mem_dt = mem_dt.replace(tzinfo=timezone.utc)
+
+            now = datetime.now(timezone.utc)
+            hours = (now - mem_dt).total_seconds() / 3600.0
+            window = self._settings.SESSION_COHERENCE_WINDOW_HOURS
+
+            if hours < window:
+                freshness = 1.0 - (hours / window)
+                bonus = self._settings.SESSION_COHERENCE_BONUS * freshness
+                return min(heat + bonus, 1.0)
+        except (ValueError, TypeError):
+            pass
+
+        return heat

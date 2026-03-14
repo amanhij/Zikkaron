@@ -108,7 +108,7 @@ class TestLowSurprisalDuplicate:
         )
         assert should_store is False
         assert surprisal < 0.4
-        assert reason == "below_threshold"
+        assert reason.startswith("below_threshold")
 
 
 class TestAlwaysStoreErrors:

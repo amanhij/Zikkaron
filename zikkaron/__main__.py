@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+from pathlib import Path
 
 from zikkaron import __version__
 from zikkaron.server import main
@@ -99,6 +100,100 @@ def cmd_restore(args):
         storage.close()
 
 
+def cmd_capture(args):
+    """Lightweight action capture — writes directly to SQLite without ML models.
+
+    Used by PostToolCall hooks and manual capture. Only imports sqlite3.
+    """
+    import sqlite3
+    from datetime import datetime, timezone
+    from zikkaron.config import Settings
+
+    settings = Settings()
+    db_path = Path(args.db_path or settings.DB_PATH).expanduser()
+    if not db_path.exists():
+        print(f"Database not found: {db_path}", file=sys.stderr)
+        sys.exit(1)
+
+    conn = sqlite3.connect(str(db_path), timeout=1)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS action_log("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "tool_name TEXT NOT NULL,"
+        "tool_input_summary TEXT DEFAULT '',"
+        "directory TEXT DEFAULT '',"
+        "session_id TEXT DEFAULT '',"
+        "timestamp TEXT NOT NULL,"
+        "processed INTEGER DEFAULT 0)"
+    )
+    conn.execute(
+        "INSERT INTO action_log (tool_name, tool_input_summary, directory, session_id, timestamp) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (
+            args.tool_name,
+            args.summary or "",
+            args.directory or "",
+            args.session or "",
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def cmd_context(args):
+    """Lightweight context query — reads hot memories without loading ML models.
+
+    Used by SessionStart hooks to inject context on every session.
+    """
+    import json
+    import sqlite3
+    from zikkaron.config import Settings
+
+    settings = Settings()
+    db_path = Path(args.db_path or settings.DB_PATH).expanduser()
+    if not db_path.exists():
+        return
+
+    directory = args.directory
+    conn = sqlite3.connect(str(db_path), timeout=2)
+    conn.row_factory = sqlite3.Row
+
+    hot = conn.execute(
+        "SELECT content, heat FROM memories "
+        "WHERE directory_context = ? AND heat > 0.5 "
+        "ORDER BY heat DESC LIMIT 6",
+        (directory,),
+    ).fetchall()
+
+    anchored = conn.execute(
+        "SELECT content FROM memories "
+        "WHERE is_protected = 1 AND heat > 0 AND tags LIKE '%_anchor%' "
+        "ORDER BY created_at DESC LIMIT 4"
+    ).fetchall()
+
+    conn.close()
+
+    if not hot and not anchored:
+        return
+
+    print("# Zikkaron — Session Context\n")
+    if anchored:
+        print("## Critical Facts")
+        for row in anchored:
+            print(f"- {row['content'][:200]}")
+        print()
+    if hot:
+        print("## Project Context")
+        for row in hot:
+            content = row["content"]
+            if len(content) > 200:
+                content = content[:200] + "..."
+            print(f"- [{row['heat']:.1f}] {content}")
+        print()
+    print(f"*Context for: {directory}*")
+
+
 def cli():
     parser = argparse.ArgumentParser(description="Zikkaron memory engine MCP server")
     subparsers = parser.add_subparsers(dest="command")
@@ -129,12 +224,29 @@ def cli():
     restore_parser.add_argument("directory", help="Project directory")
     restore_parser.add_argument("--db-path", type=str, default=None, help="SQLite database path")
 
+    # capture subcommand (used by PostToolCall hooks)
+    capture_parser = subparsers.add_parser("capture", help="Lightweight action capture")
+    capture_parser.add_argument("--tool", dest="tool_name", required=True, help="Tool name")
+    capture_parser.add_argument("--summary", type=str, default="", help="Tool input summary")
+    capture_parser.add_argument("--directory", type=str, default="", help="Working directory")
+    capture_parser.add_argument("--session", type=str, default="", help="Session ID")
+    capture_parser.add_argument("--db-path", type=str, default=None, help="SQLite database path")
+
+    # context subcommand (used by SessionStart hooks)
+    context_parser = subparsers.add_parser("context", help="Lightweight context query")
+    context_parser.add_argument("directory", help="Project directory")
+    context_parser.add_argument("--db-path", type=str, default=None, help="SQLite database path")
+
     args = parser.parse_args()
 
     if args.command == "drain":
         cmd_drain(args)
     elif args.command == "restore":
         cmd_restore(args)
+    elif args.command == "capture":
+        cmd_capture(args)
+    elif args.command == "context":
+        cmd_context(args)
     else:
         # Default: run MCP server
         if not args.quiet and args.transport != "stdio":
