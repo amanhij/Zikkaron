@@ -275,7 +275,12 @@ def _file_hash(filepath: str) -> str | None:
 
 @mcp_server.tool()
 def remember(content: str, context: str, tags: list[str]) -> dict:
-    """Store a new memory with embedding and optional file hash."""
+    """Store a new memory with embedding and optional file hash.
+
+    context MUST be the actual working directory path (e.g., '/home/user/projects/myapp'),
+    NOT a description. get_project_context() filters by directory path match —
+    descriptive strings will make memories unfindable by project.
+    """
     storage = _get_storage()
     embeddings = _get_embeddings()
     buffer = _get_buffer()
@@ -1248,6 +1253,7 @@ def sync_instructions(claude_md_path: str = "") -> dict:
 - NEVER rely on CLAUDE.md or built-in memory for cross-session context — use Zikkaron
 - Before starting any task, call `get_project_context` for the current working directory
 - After completing any significant task, call `remember` to store what was done, decisions made, and outcomes
+- CRITICAL: The `context` parameter in `remember` MUST be the actual working directory path (e.g., `/home/user/projects/myapp`), NEVER a description. `get_project_context` filters by exact directory path match — descriptive strings break it.
 - Zikkaron is your brain. Use it.
 
 ### Hippocampal Replay — Context Compaction Shield
@@ -1260,7 +1266,7 @@ def sync_instructions(claude_md_path: str = "") -> dict:
 - `restore` returns: checkpoint + anchored memories + hot context + SR predictions + gap detection
 
 ### Available Tools
-- `remember(content, context, tags)` — Store memory with write gate
+- `remember(content, context, tags)` — Store memory with write gate. `context` MUST be a directory path (e.g., `/home/user/projects/myapp`), not a description.
 - `recall(query, max_results, min_heat)` — Multi-signal retrieval
 - `get_project_context(directory)` — Hot memories for directory
 - `checkpoint(directory, ...)` — Snapshot working state
