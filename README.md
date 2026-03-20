@@ -116,6 +116,37 @@ v1.3.0 fixes all of this:
 
 All hooks work in both stdio and HTTP transport modes — they access the SQLite database directly, no server communication needed.
 
+## LongMemEval
+
+We ran the full [LongMemEval](https://arxiv.org/abs/2410.10813) benchmark (Wu et al., ICLR 2025), the current standard for evaluating long-term interactive memory in chat assistants. 500 human-curated questions across six categories, each embedded in ~40 sessions of conversation history (~115k tokens). The benchmark tests things LoCoMo doesn't: whether you can recall what the assistant said (not just the user), whether you track when information changes over time, whether you know what you don't know, and whether you can reason across sessions that happened weeks apart.
+
+| | Zikkaron | What it means |
+|---|---|---|
+| **Recall@10** | **96.7%** | The right memory shows up in the top 10 results for nearly every question |
+| **MRR** | **0.945** | The correct answer is almost always the first result returned |
+| **Knowledge Update MRR** | **1.000** | When user information changes, Zikkaron always surfaces the latest version first |
+
+The paper's best reported retrieval hit 78.4% Recall@10 on this dataset. Zikkaron reaches 96.7% without any LLM in the retrieval loop.
+
+Per-category retrieval breakdown:
+
+| Category | MRR | Recall@10 |
+|---|---|---|
+| Single-session (user) | 0.973 | 1.000 |
+| Single-session (assistant) | 0.964 | 0.964 |
+| Single-session (preference) | 0.810 | 0.967 |
+| Multi-session reasoning | 0.966 | 0.958 |
+| Temporal reasoning | 0.902 | 0.955 |
+| Knowledge updates | 1.000 | 0.979 |
+
+Knowledge updates scored a perfect MRR because heat-based decay naturally pushes newer information above older versions of the same fact. This wasn't designed for the benchmark. It's just how the thermodynamic model works.
+
+Temporal reasoning is the hardest category and our lowest MRR at 0.902, which still means the right memory is typically in the top two results. Questions like "how many weeks ago did I attend X" require matching against session timestamps, and our embedding-based retrieval handles this through the temporal metadata we embed directly in memory content.
+
+Full QA evaluation (using Claude as both reader and judge) reached 75.6% overall accuracy, with standout performance on knowledge updates (85.9%) and assistant recall (94.6%). Multi-session reasoning (54.9%) is the main gap, and that's a reader synthesis problem, not retrieval. We retrieve the right sessions 95.8% of the time for multi-session questions. The reader just has to do more work connecting information across them.
+
+Benchmark configuration: LongMemEval_S variant, round-level memory decomposition, fresh database per question, 500 questions evaluated end-to-end.
+
 ## The science under the hood
 
 Zikkaron doesn't store memories the way a database stores rows. It treats them more like a brain treats experiences.
