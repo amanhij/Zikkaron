@@ -4,7 +4,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/zikkaron)](https://pypi.org/project/zikkaron/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-969%20passed-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-998%20passed-brightgreen)](#testing)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 
 *Zikkaron (זיכרון) is Hebrew for "memory."*
@@ -13,7 +13,7 @@ Your AI forgets you every time you close the tab. Every architecture decision yo
 
 Zikkaron is a persistent memory engine for Claude Code built on computational neuroscience. It remembers what you worked on, how you think, what you decided and why. Not as a dumb text dump that gets shoved into context, but as a living memory system that consolidates, forgets intelligently, and reconstructs the right context at the right time.
 
-26 subsystems. 23 MCP tools. Runs entirely on your machine. One SQLite file.
+26 subsystems. 24 MCP tools. Runs entirely on your machine. One SQLite file.
 
 ## Two minutes to never repeat yourself again
 
@@ -116,6 +116,40 @@ v1.3.0 fixes all of this:
 
 All hooks work in both stdio and HTTP transport modes — they access the SQLite database directly, no server communication needed.
 
+## Project seeding: cold start solved
+
+Zikkaron builds memory organically over sessions. That's great for ongoing work, but what about when you install it on a codebase you've been working on for a year? You'd spend dozens of sessions before Claude has meaningful coverage of your project. By then, you've already repeated yourself fifty times.
+
+`seed_project` fixes this. One call, and Zikkaron scans your entire project and creates foundational memories from structure, configs, documentation, CI/CD, entry points, and per-component summaries. Claude starts the next session already knowing what your project is, what it's built with, and how it's organized.
+
+```bash
+# CLI
+zikkaron seed /path/to/your/project
+
+# Preview without storing
+zikkaron seed /path/to/your/project --dry-run
+```
+
+Or call it as an MCP tool from within Claude Code:
+
+```
+Tool: seed_project
+  directory: "/path/to/your/project"
+```
+
+**What it extracts:**
+
+- **Project overview** — name, tech stack, file counts, directory tree
+- **Config files** — `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, and 15+ others. Parsed properly (TOML via `tomllib`, JSON via `json`), not regex-scraped. Dependencies, scripts, workspaces, build backends — all extracted.
+- **Documentation** — README, ARCHITECTURE, CONTRIBUTING, CLAUDE.md, CHANGELOG
+- **CI/CD** — GitHub Actions, GitLab CI, Jenkins, Travis, Azure Pipelines
+- **Entry points** — `main.*`, `index.*`, `app.*`, `server.*`, `__main__.py`
+- **Per-component summaries** — monorepo-aware. Detects sub-project boundaries by looking for nested config files (`packages/web/package.json`, `services/api/Cargo.toml`), not just top-level directories
+
+**Designed for re-runs.** Re-seeding replaces old seed memories cleanly instead of appending to them. Your project evolves, you re-seed, and the memories reflect the current state. All seed memories are tagged `_seed` for identification.
+
+**Heat differentiation.** Not all seeded memories are equal. Project overview and documentation start hotter (0.85-0.9) than component file listings (0.5). Claude surfaces the important stuff first.
+
 ## LongMemEval
 
 We ran the full [LongMemEval](https://arxiv.org/abs/2410.10813) benchmark (Wu et al., ICLR 2025), the current standard for evaluating long-term interactive memory in chat assistants. 500 human-curated questions across six categories, each embedded in ~40 sessions of conversation history (~115k tokens). The benchmark tests things LoCoMo doesn't: whether you can recall what the assistant said (not just the user), whether you track when information changes over time, whether you know what you don't know, and whether you can reason across sessions that happened weeks apart.
@@ -163,7 +197,7 @@ Zikkaron doesn't store memories the way a database stores rows. It treats them m
 
 **A cognitive map organizes everything.** Successor representations build a 2D map of concept space where memories that get accessed in similar contexts cluster together, even if their content is completely different. Debugging memories cluster near other debugging memories. Architecture decisions cluster together. Navigate this map, and you find related knowledge that keyword search would never surface.
 
-## All 23 tools
+## All 24 tools
 
 | Tool | Purpose |
 |------|---------|
@@ -190,6 +224,7 @@ Zikkaron doesn't store memories the way a database stores rows. It treats them m
 | `anchor` | Mark critical facts as compaction-resistant |
 | `install_hooks` | Enable auto-capture, context injection, and compaction recovery hooks |
 | `sync_instructions` | Update CLAUDE.md with latest Zikkaron capabilities |
+| `seed_project` | Bootstrap memory for an existing project in one scan |
 
 ## Architecture
 
@@ -263,6 +298,7 @@ Everything runs locally. A single SQLite database with WAL mode, FTS5 full-text 
 | `prospective.py` | Future-oriented triggers on directory, keyword, entity, or time |
 | `sensory_buffer.py` | Episodic capture buffer for raw session content |
 | `restoration.py` | Hippocampal Replay engine for context compaction resilience |
+| `seed.py` | Project scanning and foundational memory bootstrapping |
 
 </details>
 
@@ -323,7 +359,7 @@ Full list in `zikkaron/config.py`.
 python -m pytest zikkaron/tests/ -x -q
 ```
 
-969 tests across 34 test files covering every subsystem.
+998 tests across 34 test files covering every subsystem.
 
 ## References
 

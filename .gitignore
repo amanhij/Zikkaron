@@ -36,3 +36,4 @@ benchmarks/*.md
 benchmarks/*.log
 benchmarks/eval_*.json
 benchmarks/ablation_runs/
+benchmarks/data/

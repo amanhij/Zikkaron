@@ -1280,6 +1280,7 @@ def sync_instructions(claude_md_path: str = "") -> dict:
 - `navigate_memory(query)` — SR cognitive map navigation
 - `assess_coverage(query, directory)` — Knowledge coverage check
 - `detect_gaps(directory)` — Find knowledge gaps
+- `seed_project(directory, dry_run)` — Bootstrap memory for an existing project in one call
 
 ### Auto-Capture Hooks (v1.3.0)
 - PostToolUse hook captures EVERY tool action automatically — no manual remember needed
@@ -1368,6 +1369,41 @@ def resource_narrative(directory: str) -> str:
     if _narrative is None:
         return json.dumps({"error": "NarrativeEngine not initialized"})
     return _narrative.get_project_story(directory)
+
+
+# ── Project Seeding ────────────────────────────────────────────────────
+
+
+@mcp_server.tool()
+def seed_project(directory: str, dry_run: bool = False) -> dict:
+    """Bootstrap Zikkaron memory for an existing project in one call.
+
+    Scans the project directory and creates foundational memories from:
+    - Project structure and layout
+    - Config files (package.json, pyproject.toml, Cargo.toml, go.mod, etc.)
+    - Documentation (README, ARCHITECTURE, CONTRIBUTING, etc.)
+    - CI/CD configuration
+    - Entry points and key source files
+    - Per-component summaries (monorepo-aware via config file boundaries)
+
+    All seeded memories are tagged with '_seed' for identification.
+    Re-running is safe — old seed memories are replaced, not appended to.
+
+    directory: Project root directory to scan (absolute path).
+    dry_run: If True, scan and show what would be stored without actually storing.
+    """
+    from zikkaron.seed import seed_project as _seed
+
+    resolved = str(Path(directory).resolve())
+    result = _seed(
+        directory=resolved,
+        dry_run=dry_run,
+        storage=_storage,
+        embeddings=_embeddings,
+        thermo=_thermo,
+        curator=_curator,
+    )
+    return result
 
 
 # ── Startup ────────────────────────────────────────────────────────────

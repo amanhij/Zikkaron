@@ -31,7 +31,9 @@ Active modules:
 
 MCP Tools: remember, recall, forget, validate_memory, get_project_context,
            consolidate_now, memory_stats, rate_memory, recall_hierarchical,
-           drill_down, create_trigger, get_project_story
+           drill_down, create_trigger, get_project_story, seed_project,
+           checkpoint, restore, anchor, navigate_memory, assess_coverage,
+           detect_gaps, install_hooks, sync_instructions
 
 MCP Resources: memory://stats, memory://hot, memory://stale,
                memory://processes, memory://narrative/{{directory}}
@@ -194,6 +196,37 @@ def cmd_context(args):
     print(f"*Context for: {directory}*")
 
 
+def cmd_seed(args):
+    """Bootstrap memory for an existing project by scanning its structure."""
+    import json
+    from zikkaron.seed import seed_project
+
+    directory = str(Path(args.directory).resolve())
+    print(f"Seeding project: {directory}", file=sys.stderr)
+
+    result = seed_project(
+        directory=directory,
+        db_path=args.db_path,
+        dry_run=args.dry_run,
+    )
+
+    if args.dry_run:
+        print(f"\n[DRY RUN] Would create {result['memories_generated']} memories for {result['project']}\n", file=sys.stderr)
+        for mem in result.get("memories", []):
+            tags = ", ".join(mem["tags"])
+            print(f"  [{tags}] {mem['content'][:120]}...", file=sys.stderr)
+    else:
+        replaced_msg = f", replaced {result['replaced']} old" if result.get('replaced') else ""
+        print(
+            f"\nSeeded {result['project']}: "
+            f"{result['created']} created{replaced_msg} "
+            f"(from {result['memories_generated']} total)",
+            file=sys.stderr,
+        )
+
+    print(json.dumps(result))
+
+
 def cli():
     parser = argparse.ArgumentParser(description="Zikkaron memory engine MCP server")
     subparsers = parser.add_subparsers(dest="command")
@@ -237,6 +270,12 @@ def cli():
     context_parser.add_argument("directory", help="Project directory")
     context_parser.add_argument("--db-path", type=str, default=None, help="SQLite database path")
 
+    # seed subcommand
+    seed_parser = subparsers.add_parser("seed", help="Bootstrap memory for an existing project")
+    seed_parser.add_argument("directory", help="Project directory to scan and seed")
+    seed_parser.add_argument("--db-path", type=str, default=None, help="SQLite database path")
+    seed_parser.add_argument("--dry-run", action="store_true", help="Scan and show what would be stored without storing")
+
     args = parser.parse_args()
 
     if args.command == "drain":
@@ -247,6 +286,8 @@ def cli():
         cmd_capture(args)
     elif args.command == "context":
         cmd_context(args)
+    elif args.command == "seed":
+        cmd_seed(args)
     else:
         # Default: run MCP server
         if not args.quiet and args.transport != "stdio":
