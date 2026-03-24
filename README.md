@@ -97,7 +97,7 @@ Benchmark configuration: BEAM-10M split, 10 conversations, 200 questions, pair-c
 
 ## Hippocampal Replay: Context that survives compaction
 
-Here's a problem nobody talks about. Claude Code has a 200K token context window. During long sessions, when that window fills up, it *compacts*: summarizes older messages, strips tool outputs, paraphrases your instructions. Important nuance evaporates. Decisions you anchored early in the conversation dissolve into vague summaries.
+Here's a problem nobody talks about. Claude Code has a 200k/1M token context window. During long sessions, when that window fills up, it *compacts*: summarizes older messages, strips tool outputs, paraphrases your instructions. Important nuance evaporates. Decisions you anchored early in the conversation dissolve into vague summaries.
 
 **Hippocampal Replay** fixes this. Named after the neuroscience phenomenon where your brain replays important experiences during sleep to consolidate them into long-term memory, it treats context compaction as the "sleep" and replays what matters when Claude "wakes up."
 
