@@ -204,10 +204,10 @@ def test_get_project_context_filters_by_directory():
 
 def test_get_project_context_filters_by_heat():
     r = server.remember("cold memory", "/projects/c", ["test"])
-    server._get_storage().update_memory_heat(r["id"], 0.1)
+    server._get_storage().update_memory_heat(r["id"], 0.005)
 
     result = server.get_project_context("/projects/c")
-    assert len(result["memories"]) == 0  # 0.1 < HOT_THRESHOLD (0.7)
+    assert len(result["memories"]) == 0  # 0.005 < PROJECT_CONTEXT_MIN_HEAT (0.01)
 
 
 def test_get_project_context_returns_hot():
