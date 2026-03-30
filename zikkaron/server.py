@@ -719,7 +719,7 @@ def get_project_context(directory: str) -> dict:
     and includes a suggestion if they're missing.
     """
     storage = _get_storage()
-    memories = storage.get_memories_for_directory(directory, min_heat=settings.HOT_THRESHOLD)
+    memories = storage.get_memories_for_directory(directory, min_heat=settings.PROJECT_CONTEXT_MIN_HEAT)
     for m in memories:
         m.pop("embedding", None)
         m.pop("hdc_vector", None)

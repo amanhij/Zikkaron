@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     DECAY_FACTOR: float = 0.95
     COLD_THRESHOLD: float = 0.05
     HOT_THRESHOLD: float = 0.7
+    PROJECT_CONTEXT_MIN_HEAT: float = 0.01
     MAX_EPISODE_TOKENS: int = 50000
     OVERLAP_TOKENS: int = 2000
     EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
