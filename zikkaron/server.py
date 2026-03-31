@@ -1107,11 +1107,12 @@ def anchor(content: str, context: str, reason: str = "") -> dict:
 def install_hooks(project_directory: str = "") -> dict:
     """Install Claude Code hooks for automatic memory capture and replay.
 
-    Installs four hook types:
+    Installs five hook types:
       - PreCompact: drain context before compaction
       - SessionStart (compact): restore context after compaction
       - SessionStart (all): inject project context on every new session
       - PostToolUse: capture every tool action into action_log
+      - UserPromptSubmit: auto-recall relevant memories on every user turn
 
     Works in both stdio and HTTP transport modes — all hooks use
     direct SQLite access (no server communication needed).
@@ -1133,6 +1134,7 @@ def install_hooks(project_directory: str = "") -> dict:
         "post-compact-rehydrate.sh": 0o755,
         "post-tool-capture.py": 0o755,
         "session-start-context.py": 0o755,
+        "prompt-recall.py": 0o755,
     }
 
     for filename, mode in hook_files.items():
@@ -1146,6 +1148,7 @@ def install_hooks(project_directory: str = "") -> dict:
     post_compact_dst = hooks_dir / "post-compact-rehydrate.sh"
     post_tool_dst = hooks_dir / "post-tool-capture.py"
     session_ctx_dst = hooks_dir / "session-start-context.py"
+    prompt_recall_dst = hooks_dir / "prompt-recall.py"
 
     # Write hooks configuration
     settings_path = claude_dir / "settings.json"
@@ -1211,6 +1214,19 @@ def install_hooks(project_directory: str = "") -> dict:
         }
     ]
 
+    # UserPromptSubmit hook — auto-recall relevant memories on every user turn
+    hooks_config["UserPromptSubmit"] = [
+        {
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"python3 {prompt_recall_dst}",
+                }
+            ],
+        }
+    ]
+
     settings_data["hooks"] = hooks_config
     settings_path.write_text(json.dumps(settings_data, indent=2))
 
@@ -1223,6 +1239,7 @@ def install_hooks(project_directory: str = "") -> dict:
             "SessionStart (context)",
             "SessionStart (compact restore)",
             "PostToolUse (auto-capture)",
+            "UserPromptSubmit (auto-recall)",
         ],
         "settings_file": str(settings_path),
     }
