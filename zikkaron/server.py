@@ -1183,7 +1183,7 @@ def install_hooks(project_directory: str = "") -> dict:
         "hooks": [
             {
                 "type": "command",
-                "command": f"python3 {session_ctx_dst}",
+                "command": f'python3 "{session_ctx_dst}"',
             }
         ],
     })
@@ -1208,7 +1208,7 @@ def install_hooks(project_directory: str = "") -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"python3 {post_tool_dst}",
+                    "command": f'python3 "{post_tool_dst}"',
                 }
             ],
         }
@@ -1221,7 +1221,7 @@ def install_hooks(project_directory: str = "") -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"python3 {prompt_recall_dst}",
+                    "command": f'python3 "{prompt_recall_dst}"',
                 }
             ],
         }
