@@ -730,9 +730,25 @@ class StorageEngine:
         self._conn.commit()
 
     def delete_memory(self, memory_id: int):
-        # Delete from sqlite-vec first (ignore if not present)
+        # Delete FK dependents first
+        self._conn.execute(
+            "DELETE FROM memory_archives WHERE original_memory_id = ?",
+            (memory_id,),
+        )
+        self._conn.execute(
+            "DELETE FROM memory_transitions WHERE from_memory_id = ? OR to_memory_id = ?",
+            (memory_id, memory_id),
+        )
+        # Delete from vector tables (ignore if not present)
         try:
             self.delete_vector(memory_id)
+        except Exception:
+            pass
+        try:
+            self._conn.execute(
+                "DELETE FROM memory_implicit_vectors WHERE rowid = ?",
+                (memory_id,),
+            )
         except Exception:
             pass
         self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))

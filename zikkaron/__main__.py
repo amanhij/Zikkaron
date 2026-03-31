@@ -196,6 +196,312 @@ def cmd_context(args):
     print(f"*Context for: {directory}*")
 
 
+def cmd_stats(args):
+    """Show detailed memory statistics."""
+    import json
+    import sqlite3
+    from datetime import datetime, timezone
+    from zikkaron.config import Settings
+
+    settings = Settings()
+    db_path = Path(args.db_path or settings.DB_PATH).expanduser()
+    if not db_path.exists():
+        print("No database found. Run zikkaron and store some memories first.", file=sys.stderr)
+        sys.exit(1)
+
+    conn = sqlite3.connect(str(db_path), timeout=2)
+    conn.row_factory = sqlite3.Row
+    project = str(Path(args.project).resolve()) if args.project else None
+
+    where = "WHERE directory_context = ?" if project else ""
+    params: tuple = (project,) if project else ()
+
+    # ── Core counts ──
+    total = conn.execute(f"SELECT COUNT(*) FROM memories {where}", params).fetchone()[0]
+    if total == 0:
+        label = f"project {project}" if project else "database"
+        print(f"No memories in {label}.", file=sys.stderr)
+        conn.close()
+        sys.exit(0)
+
+    active = conn.execute(
+        f"SELECT COUNT(*) FROM memories {where + ' AND ' if where else 'WHERE '}is_stale = 0 AND heat >= 0.05",
+        params,
+    ).fetchone()[0]
+    stale = conn.execute(
+        f"SELECT COUNT(*) FROM memories {where + ' AND ' if where else 'WHERE '}is_stale = 1",
+        params,
+    ).fetchone()[0]
+    archived = total - active - stale
+    protected = conn.execute(
+        f"SELECT COUNT(*) FROM memories {where + ' AND ' if where else 'WHERE '}is_protected = 1",
+        params,
+    ).fetchone()[0]
+
+    # ── Type breakdown ──
+    episodic = conn.execute(
+        f"SELECT COUNT(*) FROM memories {where + ' AND ' if where else 'WHERE '}store_type = 'episodic'",
+        params,
+    ).fetchone()[0]
+    semantic = conn.execute(
+        f"SELECT COUNT(*) FROM memories {where + ' AND ' if where else 'WHERE '}store_type = 'semantic'",
+        params,
+    ).fetchone()[0]
+
+    # ── Compression levels ──
+    comp_0 = conn.execute(
+        f"SELECT COUNT(*) FROM memories {where + ' AND ' if where else 'WHERE '}compression_level = 0",
+        params,
+    ).fetchone()[0]
+    comp_1 = conn.execute(
+        f"SELECT COUNT(*) FROM memories {where + ' AND ' if where else 'WHERE '}compression_level = 1",
+        params,
+    ).fetchone()[0]
+    comp_2 = conn.execute(
+        f"SELECT COUNT(*) FROM memories {where + ' AND ' if where else 'WHERE '}compression_level = 2",
+        params,
+    ).fetchone()[0]
+
+    # ── Heat stats ──
+    heat_row = conn.execute(
+        f"SELECT MIN(heat), AVG(heat), MAX(heat) FROM memories {where}", params
+    ).fetchone()
+    heat_min, heat_avg, heat_max = heat_row[0] or 0, heat_row[1] or 0, heat_row[2] or 0
+
+    heat_buckets = []
+    for lo, hi, label in [(0, 0.01, "cold (<0.01)"), (0.01, 0.1, "cool (0.01-0.1)"),
+                           (0.1, 0.5, "warm (0.1-0.5)"), (0.5, 0.9, "hot (0.5-0.9)"),
+                           (0.9, 999, "burning (0.9+)")]:
+        c = conn.execute(
+            f"SELECT COUNT(*) FROM memories {where + ' AND ' if where else 'WHERE '}heat >= ? AND heat < ?",
+            params + (lo, hi),
+        ).fetchone()[0]
+        heat_buckets.append((label, c))
+
+    # ── Access stats ──
+    access_row = conn.execute(
+        f"SELECT SUM(access_count), AVG(access_count), MAX(access_count) FROM memories {where}",
+        params,
+    ).fetchone()
+    total_accesses = access_row[0] or 0
+    avg_accesses = access_row[1] or 0
+    max_accesses = access_row[2] or 0
+
+    useful_row = conn.execute(
+        f"SELECT SUM(useful_count) FROM memories {where}", params
+    ).fetchone()
+    total_useful = useful_row[0] or 0
+
+    never_accessed = conn.execute(
+        f"SELECT COUNT(*) FROM memories {where + ' AND ' if where else 'WHERE '}access_count = 0",
+        params,
+    ).fetchone()[0]
+
+    # ── Temporal stats ──
+    oldest = conn.execute(
+        f"SELECT MIN(created_at) FROM memories {where}", params
+    ).fetchone()[0]
+    newest = conn.execute(
+        f"SELECT MAX(created_at) FROM memories {where}", params
+    ).fetchone()[0]
+    last_accessed = conn.execute(
+        f"SELECT MAX(last_accessed) FROM memories {where}", params
+    ).fetchone()[0]
+
+    now = datetime.now(timezone.utc)
+    age_days = None
+    if oldest:
+        try:
+            oldest_dt = datetime.fromisoformat(oldest.replace("Z", "+00:00"))
+            age_days = (now - oldest_dt).days
+        except Exception:
+            pass
+
+    # ── Per-project breakdown (only when no --project filter) ──
+    project_rows = []
+    if not project:
+        project_rows = conn.execute(
+            "SELECT directory_context, COUNT(*) as cnt, AVG(heat) as avg_h, "
+            "MAX(created_at) as last_created "
+            "FROM memories WHERE directory_context != '' "
+            "GROUP BY directory_context ORDER BY cnt DESC LIMIT 15"
+        ).fetchall()
+
+    # ── Consolidation history ──
+    total_consolidations = conn.execute(
+        "SELECT COUNT(*) FROM consolidation_log"
+    ).fetchone()[0]
+    last_consol = conn.execute(
+        "SELECT timestamp, duration_ms, memories_added, memories_archived "
+        "FROM consolidation_log ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    avg_duration = conn.execute(
+        "SELECT AVG(duration_ms) FROM consolidation_log"
+    ).fetchone()[0] or 0
+
+    # ── Knowledge graph ──
+    try:
+        entity_count = conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+        rel_count = conn.execute("SELECT COUNT(*) FROM relationships").fetchone()[0]
+    except Exception:
+        entity_count = rel_count = 0
+
+    try:
+        causal_edges = conn.execute("SELECT COUNT(*) FROM causal_dag_edges").fetchone()[0]
+    except Exception:
+        causal_edges = 0
+
+    # ── Action log ──
+    try:
+        action_total = conn.execute("SELECT COUNT(*) FROM action_log").fetchone()[0]
+        action_unprocessed = conn.execute(
+            "SELECT COUNT(*) FROM action_log WHERE processed = 0"
+        ).fetchone()[0]
+    except Exception:
+        action_total = action_unprocessed = 0
+
+    # ── Clusters ──
+    try:
+        cluster_count = conn.execute("SELECT COUNT(*) FROM memory_clusters").fetchone()[0]
+    except Exception:
+        cluster_count = 0
+
+    # ── Narrative entries ──
+    try:
+        narrative_count = conn.execute("SELECT COUNT(*) FROM narrative_entries").fetchone()[0]
+    except Exception:
+        narrative_count = 0
+
+    # ── Prospective memories ──
+    try:
+        triggers_active = conn.execute(
+            "SELECT COUNT(*) FROM prospective_memories WHERE is_active = 1"
+        ).fetchone()[0]
+        triggers_fired = conn.execute(
+            "SELECT SUM(triggered_count) FROM prospective_memories"
+        ).fetchone()[0] or 0
+    except Exception:
+        triggers_active = triggers_fired = 0
+
+    # ── Top tags ──
+    tag_counts: dict[str, int] = {}
+    for row in conn.execute(f"SELECT tags FROM memories {where}", params).fetchall():
+        try:
+            for tag in json.loads(row[0] or "[]"):
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        except Exception:
+            pass
+    top_tags = sorted(tag_counts.items(), key=lambda x: -x[1])[:10]
+
+    conn.close()
+
+    # ── Output ──
+    if args.format == "json":
+        data = {
+            "total": total, "active": active, "stale": stale, "archived": archived,
+            "protected": protected, "episodic": episodic, "semantic": semantic,
+            "compression": {"raw": comp_0, "gist": comp_1, "tag": comp_2},
+            "heat": {"min": heat_min, "avg": heat_avg, "max": heat_max,
+                     "buckets": {b[0]: b[1] for b in heat_buckets}},
+            "access": {"total": total_accesses, "avg": avg_accesses,
+                       "max": max_accesses, "useful": total_useful,
+                       "never_accessed": never_accessed},
+            "temporal": {"oldest": oldest, "newest": newest,
+                         "last_accessed": last_accessed, "age_days": age_days},
+            "consolidation": {"total": total_consolidations,
+                              "avg_duration_ms": avg_duration},
+            "knowledge_graph": {"entities": entity_count, "relationships": rel_count,
+                                "causal_edges": causal_edges},
+            "action_log": {"total": action_total, "unprocessed": action_unprocessed},
+            "clusters": cluster_count, "narratives": narrative_count,
+            "triggers": {"active": triggers_active, "fired": triggers_fired},
+            "top_tags": dict(top_tags),
+        }
+        if project_rows:
+            data["projects"] = [
+                {"directory": r[0], "count": r[1], "avg_heat": round(r[2], 4),
+                 "last_created": r[3]}
+                for r in project_rows
+            ]
+        print(json.dumps(data, indent=2))
+        return
+
+    # Human-readable table output
+    header = f"=== Zikkaron Stats{f' — {project}' if project else ''} ==="
+    print(header)
+    print()
+
+    print("MEMORIES")
+    print(f"  Total:     {total}")
+    print(f"  Active:    {active}")
+    print(f"  Stale:     {stale}")
+    print(f"  Archived:  {archived}")
+    print(f"  Protected: {protected}")
+    print()
+
+    print("TYPES")
+    print(f"  Episodic:  {episodic}")
+    print(f"  Semantic:  {semantic}")
+    print(f"  Raw:       {comp_0}  |  Gist: {comp_1}  |  Tag: {comp_2}")
+    print()
+
+    print("HEAT")
+    print(f"  Min: {heat_min:.4f}  |  Avg: {heat_avg:.4f}  |  Max: {heat_max:.4f}")
+    for label, count in heat_buckets:
+        bar = "#" * min(count, 40)
+        print(f"  {label:20s} {count:5d}  {bar}")
+    print()
+
+    print("ACCESS")
+    print(f"  Total recalls:   {total_accesses}")
+    print(f"  Avg per memory:  {avg_accesses:.1f}")
+    print(f"  Max on a single: {max_accesses}")
+    print(f"  Rated useful:    {total_useful}")
+    print(f"  Never accessed:  {never_accessed}")
+    print()
+
+    print("TEMPORAL")
+    if age_days is not None:
+        print(f"  Memory span:     {age_days} days")
+    print(f"  Oldest:          {oldest or 'n/a'}")
+    print(f"  Newest:          {newest or 'n/a'}")
+    print(f"  Last accessed:   {last_accessed or 'n/a'}")
+    print()
+
+    if project_rows:
+        print("PROJECTS (top 15)")
+        for r in project_rows:
+            print(f"  {r[1]:5d} memories  heat={r[2]:.4f}  {r[0]}")
+        print()
+
+    print("CONSOLIDATION")
+    print(f"  Total cycles:    {total_consolidations}")
+    print(f"  Avg duration:    {avg_duration:.0f}ms")
+    if last_consol:
+        print(f"  Last run:        {last_consol['timestamp']}")
+        print(f"    Added: {last_consol['memories_added']}  Archived: {last_consol['memories_archived']}  Duration: {last_consol['duration_ms']}ms")
+    print()
+
+    print("KNOWLEDGE GRAPH")
+    print(f"  Entities:        {entity_count}")
+    print(f"  Relationships:   {rel_count}")
+    print(f"  Causal edges:    {causal_edges}")
+    print()
+
+    print("SUBSYSTEMS")
+    print(f"  Clusters:        {cluster_count}")
+    print(f"  Narratives:      {narrative_count}")
+    print(f"  Active triggers: {triggers_active}  (fired {triggers_fired} times)")
+    print(f"  Action log:      {action_total} total, {action_unprocessed} unprocessed")
+    print()
+
+    if top_tags:
+        print("TOP TAGS")
+        for tag, count in top_tags:
+            print(f"  {count:5d}  {tag}")
+        print()
+
+
 def cmd_seed(args):
     """Bootstrap memory for an existing project by scanning its structure."""
     import json
@@ -270,6 +576,12 @@ def cli():
     context_parser.add_argument("directory", help="Project directory")
     context_parser.add_argument("--db-path", type=str, default=None, help="SQLite database path")
 
+    # stats subcommand
+    stats_parser = subparsers.add_parser("stats", help="Show detailed memory statistics")
+    stats_parser.add_argument("--project", type=str, default=None, help="Filter to a specific project directory")
+    stats_parser.add_argument("--db-path", type=str, default=None, help="SQLite database path")
+    stats_parser.add_argument("--format", choices=["table", "json"], default="table", help="Output format (default: table)")
+
     # seed subcommand
     seed_parser = subparsers.add_parser("seed", help="Bootstrap memory for an existing project")
     seed_parser.add_argument("directory", help="Project directory to scan and seed")
@@ -288,6 +600,8 @@ def cli():
         cmd_context(args)
     elif args.command == "seed":
         cmd_seed(args)
+    elif args.command == "stats":
+        cmd_stats(args)
     else:
         # Default: run MCP server
         if not args.quiet and args.transport != "stdio":

@@ -708,14 +708,29 @@ def _delete_existing_seed_memories(storage, directory: str) -> int:
 
     ids = [r[0] for r in rows]
     for mid in ids:
-        storage._conn.execute("DELETE FROM memories WHERE id = ?", (mid,))
-        # Also clean up vec0
+        # Delete FK dependents first
+        storage._conn.execute(
+            "DELETE FROM memory_archives WHERE original_memory_id = ?", (mid,)
+        )
+        storage._conn.execute(
+            "DELETE FROM memory_transitions WHERE from_memory_id = ? OR to_memory_id = ?",
+            (mid, mid),
+        )
+        # Clean up vector tables
         try:
             storage._conn.execute(
                 "DELETE FROM memory_vectors WHERE rowid = ?", (mid,)
             )
         except Exception:
             pass
+        try:
+            storage._conn.execute(
+                "DELETE FROM memory_implicit_vectors WHERE rowid = ?", (mid,)
+            )
+        except Exception:
+            pass
+        # Now safe to delete the memory itself
+        storage._conn.execute("DELETE FROM memories WHERE id = ?", (mid,))
     storage._conn.commit()
     return len(ids)
 
