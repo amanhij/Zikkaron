@@ -1,6 +1,8 @@
 """Local embedding engine wrapping sentence-transformers for semantic operations."""
 
 import logging
+import os
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -41,6 +43,45 @@ class EmbeddingEngine:
         self._unavailable = False
         self._query_cache: dict[str, bytes] = {}
 
+    def _is_model_cached(self) -> bool:
+        """Check if the model is already downloaded in the HuggingFace cache."""
+        # Check all supported HF cache locations
+        cache_candidates = [
+            os.environ.get("HF_HUB_CACHE"),
+            os.environ.get("HUGGINGFACE_HUB_CACHE"),
+        ]
+        hf_home = os.environ.get("HF_HOME")
+        if hf_home:
+            cache_candidates.append(str(Path(hf_home) / "hub"))
+        xdg = os.environ.get("XDG_CACHE_HOME")
+        if xdg:
+            cache_candidates.append(str(Path(xdg) / "huggingface" / "hub"))
+        cache_candidates.append(str(Path.home() / ".cache" / "huggingface" / "hub"))
+
+        # Try both bare name and sentence-transformers/ prefixed name
+        dir_names = [
+            f"models--{self.model_name.replace('/', '--')}",
+            f"models--sentence-transformers--{self.model_name.replace('/', '--')}",
+        ]
+        for cache_dir in cache_candidates:
+            if not cache_dir:
+                continue
+            for dir_name in dir_names:
+                model_path = Path(cache_dir) / dir_name
+                if not model_path.is_dir():
+                    continue
+                snapshots = model_path / "snapshots"
+                if not snapshots.is_dir():
+                    continue
+                # Check snapshots contain actual model files (not just empty dirs)
+                for snapshot in snapshots.iterdir():
+                    if snapshot.is_dir() and any(
+                        f.suffix in (".bin", ".safetensors", ".json")
+                        for f in snapshot.iterdir() if f.is_file()
+                    ):
+                        return True
+        return False
+
     def _ensure_model(self) -> None:
         """Load the SentenceTransformer model if not already loaded."""
         if self._model is not None or self._unavailable:
@@ -48,7 +89,40 @@ class EmbeddingEngine:
         try:
             from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(self.model_name, trust_remote_code=True)
+            # If model is cached, use local_files_only to avoid network requests
+            # that can fail on corporate networks and corrupt the MCP stdio pipe
+            local_only = self._is_model_cached()
+
+            # Temporarily set HF_HUB_OFFLINE only during this load, then restore
+            old_offline = os.environ.get("HF_HUB_OFFLINE")
+            if local_only:
+                os.environ["HF_HUB_OFFLINE"] = "1"
+
+            try:
+                self._model = SentenceTransformer(
+                    self.model_name, trust_remote_code=True,
+                    local_files_only=local_only,
+                )
+            except Exception:
+                # Network failure or corrupt cache — retry with local_files_only
+                try:
+                    self._model = SentenceTransformer(
+                        self.model_name, trust_remote_code=True, local_files_only=True
+                    )
+                except Exception:
+                    # Cache is corrupt or model not available locally at all.
+                    # Only try online if user didn't explicitly set HF_HUB_OFFLINE.
+                    if old_offline is not None:
+                        raise  # User wants offline — respect that
+                    self._model = SentenceTransformer(
+                        self.model_name, trust_remote_code=True
+                    )
+            finally:
+                # Restore original HF_HUB_OFFLINE state
+                if old_offline is None:
+                    os.environ.pop("HF_HUB_OFFLINE", None)
+                else:
+                    os.environ["HF_HUB_OFFLINE"] = old_offline
         except ImportError:
             logger.warning(
                 "sentence-transformers is not installed; "

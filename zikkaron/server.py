@@ -1168,7 +1168,7 @@ def install_hooks(project_directory: str = "") -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": str(pre_compact_dst),
+                    "command": f'"{pre_compact_dst}"',
                 }
             ],
         }
@@ -1194,7 +1194,7 @@ def install_hooks(project_directory: str = "") -> dict:
         "hooks": [
             {
                 "type": "command",
-                "command": str(post_compact_dst),
+                "command": f'"{post_compact_dst}"',
             }
         ],
     })

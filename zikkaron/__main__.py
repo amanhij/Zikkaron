@@ -232,11 +232,17 @@ def cmd_stats(args):
         f"SELECT COUNT(*) FROM memories {where + ' AND ' if where else 'WHERE '}is_stale = 1",
         params,
     ).fetchone()[0]
-    archived = total - active - stale
-    protected = conn.execute(
-        f"SELECT COUNT(*) FROM memories {where + ' AND ' if where else 'WHERE '}is_protected = 1",
+    archived = conn.execute(
+        f"SELECT COUNT(*) FROM memories {where + ' AND ' if where else 'WHERE '}heat < 0.05",
         params,
     ).fetchone()[0]
+    try:
+        protected = conn.execute(
+            f"SELECT COUNT(*) FROM memories {where + ' AND ' if where else 'WHERE '}is_protected = 1",
+            params,
+        ).fetchone()[0]
+    except Exception:
+        protected = 0  # pre-migration DB
 
     # ── Type breakdown ──
     episodic = conn.execute(

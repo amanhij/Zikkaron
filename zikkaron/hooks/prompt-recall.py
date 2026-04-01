@@ -2,7 +2,7 @@
 """Zikkaron auto-recall — UserPromptSubmit hook handler.
 
 Automatically retrieves relevant memories for every user prompt and
-outputs JSON with additionalContext so Claude receives them without
+outputs plain text to stdout so Claude receives them as context without
 needing to call any tool.
 
 Uses FTS5 keyword search + optional sqlite-vec vector search for hybrid retrieval.
@@ -214,7 +214,7 @@ def main():
         # Too short to meaningfully search
         return
 
-    directory = data.get("cwd", "")
+    directory = data.get("cwd", "") or os.getcwd()
 
     db_path = Path(os.environ.get("ZIKKARON_DB_PATH", "~/.zikkaron/memory.db")).expanduser()
     if not db_path.exists():
@@ -254,9 +254,9 @@ def main():
     if not context:
         return
 
-    # Output JSON with hookSpecificOutput.additionalContext per Claude Code hook contract
-    output = {"hookSpecificOutput": {"additionalContext": context}}
-    print(json.dumps(output))
+    # Plain text stdout is auto-injected as context by Claude Code
+    # This is simpler and more reliable than JSON hookSpecificOutput
+    print(context)
 
 
 if __name__ == "__main__":
