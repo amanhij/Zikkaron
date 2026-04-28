@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/amanhij-zikkaron-badge.png)](https://mseep.ai/app/amanhij-zikkaron)
+
 # Zikkaron
 
 <!-- mcp-name: io.github.amanhij/zikkaron -->
